@@ -1,0 +1,7 @@
+release/
+.android-tools/
+*.apk
+*.idsig
+*.jks
+*.p12
+*.pass
