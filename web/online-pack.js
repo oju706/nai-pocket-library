@@ -9,6 +9,7 @@
   const maxBytes = 32 * 1024 * 1024;
   const sharedZipUrl = 'https://huggingface.co/datasets/okawaritsuika/nai-shared-styles/resolve/main/NAImakeArtistGroup_shared_images_20261024_webp.zip?download=true';
   const ratings = [['sfw', 'SFW'], ['nsfw', 'NSFW'], ['unknown', '未分级']];
+  const modelFamilies = ['V5', 'V4.5', 'V4', 'V3'];
   const sections = { artist: '画师', character: '同人角色', knowledge: '画面提示词知识' };
   let recentRecords = null;
 
@@ -60,6 +61,8 @@
       try { address = localStorage.getItem(addressKey) || ''; } catch { /* The address can still be entered. */ }
     }
     let catalog = null;
+    let modelLabels = new Map();
+    let modelFilter = '';
     let rating = 'sfw';
     let showRestricted = false;
     let searchTerm = '';
@@ -155,6 +158,7 @@
       if (next !== null && (!next?.revision || !Array.isArray(next.images))) throw new Error('图包目录格式不正确。');
       const changed = catalog?.revision !== next?.revision;
       catalog = next;
+      if (shared) modelLabels = new Map((next?.images || []).map(item => [item.id, novelAiModelLabel(item.model)]));
       if (changed) {
         selected.clear();
         photoVisibility.clear();
@@ -164,6 +168,7 @@
         showRestricted = false;
         recentShowRestricted = false;
         searchTerm = '';
+        modelFilter = '';
         page = 0;
         postView = null;
         recentView = false;
@@ -181,6 +186,7 @@
       byPost = origin.byPost;
       postView = origin.postView;
       searchTerm = origin.searchTerm;
+      modelFilter = origin.modelFilter;
       page = Math.floor(origin.anchor / itemsPerPage());
       listScroll = origin.scroll;
     }
@@ -217,7 +223,7 @@
       const screen = screenRevision;
       const title = item.title || item.id;
       const frame = node('div', 'online-pack-detail-image');
-      const facts = [item.model, sections[item.section], item.source, sizeText(item.bytes)].filter(Boolean);
+      const facts = [shared ? modelLabels.get(item.id) : item.model, sections[item.section], item.source, sizeText(item.bytes)].filter(Boolean);
       const view = node('section', 'online-pack-detail');
       const original = button('查看完整原图', 'soft', () => {
         if (!isExpanded(item)) {
@@ -323,7 +329,7 @@
         updateSave();
       });
       const caption = node('span', 'online-pack-caption');
-      caption.append(node('strong', '', title), node('span', 'online-pack-note', [item.model, sections[item.section]].filter(Boolean).join(' · ')));
+      caption.append(node('strong', '', title), node('span', 'online-pack-note', [shared ? modelLabels.get(item.id) : item.model, sections[item.section]].filter(Boolean).join(' · ')));
       open.append(frame, caption);
       label.append(checkbox, node('span', '', '选择'));
       if (toggle) {
@@ -428,7 +434,7 @@
             const option = button(label, '', () => {
               if (recent) {
                 if (recentView) return;
-                recentOrigin = { byPost, postView, searchTerm, anchor: page * itemsPerPage(), scroll: body.scrollTop };
+                recentOrigin = { byPost, postView, searchTerm, modelFilter, anchor: page * itemsPerPage(), scroll: body.scrollTop };
                 recentView = true;
                 postView = null;
                 searchTerm = '';
@@ -499,7 +505,26 @@
                 body.scrollTop = listScroll;
               }));
           }
-          content.append(grouping, node('p', 'online-pack-note', '这些图片未分级，可能含成人内容。可逐张展开，也可一键展开或折叠图库。'), controls);
+          const models = [...new Set(modelLabels.values())].sort();
+          const choices = [['', '全部模型']];
+          for (const family of modelFamilies) {
+            const variants = models.filter(model => model.startsWith(`${family} `) || model.startsWith(`${family}（`));
+            if (!variants.length) continue;
+            choices.push([family, `${family} · 全部型号`], ...variants.map(variant => [variant, variant]));
+          }
+          if (models.includes('未标注')) choices.push(['未标注', '模型未标注']);
+          if (!choices.some(([value]) => value === modelFilter)) modelFilter = '';
+          const modelSelect = options(choices, modelFilter);
+          modelSelect.addEventListener('change', () => {
+            modelFilter = modelSelect.value;
+            page = 0;
+            if (postView) postView = { ...postView, anchor: 0, scroll: 0 };
+            renderCatalog();
+            body.scrollTop = 0;
+            content.querySelector('select')?.focus({ preventScroll: true });
+          });
+          content.append(grouping, field('按模型筛选', modelSelect),
+            node('p', 'online-pack-note', '这些图片未分级，可能含成人内容。可逐张展开，也可一键展开或折叠图库。'), controls);
         } else {
           const filters = node('div', 'segmented online-pack-filters');
           for (const [value, label] of ratings) {
@@ -531,17 +556,24 @@
         }
         const query = searchTerm.normalize('NFKC').trim().toLowerCase();
         const imagesById = recentView ? new Map(catalog.images.map(item => [String(item.id), item])) : null;
-        const matchesQuery = item => !query || [item.title, item.id, item.postId, item.source]
-          .some(value => String(value ?? '').normalize('NFKC').toLowerCase().includes(query));
+        const filterFamily = modelFamilies.includes(modelFilter);
+        const matches = item => {
+          const model = modelLabels.get(item.id);
+          const matchesModel = !modelFilter || model === modelFilter ||
+            (filterFamily && (model.startsWith(`${modelFilter} `) || model.startsWith(`${modelFilter}（`)));
+          return matchesModel && (!query || [item.title, item.id, item.postId, item.source]
+            .some(value => String(value ?? '').normalize('NFKC').toLowerCase().includes(query)));
+        };
         const images = shared
           ? (recentView
-            ? currentRecentRecords().map(record => imagesById.get(record.imageId)).filter(item => item && matchesQuery(item))
-            : catalog.images.filter(item => (!postView || String(item.postId ?? '') === postView.id) && matchesQuery(item)))
+            ? currentRecentRecords().map(record => imagesById.get(record.imageId)).filter(item => item && matches(item))
+            : catalog.images.filter(item => (!postView || String(item.postId ?? '') === postView.id) && matches(item)))
           : catalog.images.filter(item => item.rating === rating);
-        if (shared && query) view.append(node('p', 'online-pack-note', `找到 ${images.length} 张。`));
+        const filtered = query || modelFilter;
+        if (shared && filtered) view.append(node('p', 'online-pack-note', `找到 ${images.length} 张。`));
         if (!images.length) {
           const message = recentView
-            ? (query ? '最近浏览中没有符合条件的图片。' : '这个图包还没有最近浏览记录。')
+            ? (filtered ? '最近浏览中没有符合条件的图片。' : '这个图包还没有最近浏览记录。')
             : (shared ? '没有符合条件的图片。' : '这个分级暂时没有图片。');
           view.append(node('p', 'online-pack-note', message));
         } else if (!shared && rating === 'nsfw' && !showRestricted) {
@@ -551,8 +583,9 @@
           const groups = shared && byPost && !postView && !recentView ? groupByPost(images) : null;
           const ordered = groups ? [...groups.values()].flat() : images;
           const capacity = itemsPerPage();
-          const pageImages = ordered.slice(page * capacity, (page + 1) * capacity);
           const pages = Math.ceil(ordered.length / capacity);
+          page = Math.min(page, pages - 1);
+          const pageImages = ordered.slice(page * capacity, (page + 1) * capacity);
           function move(target) {
             if (target === page || target < 0 || target >= pages) return;
             page = target;
@@ -574,7 +607,6 @@
               const openPost = button(`${title} · ${groups.get(id).length} 张`, 'text-button', () => {
                 postView = { id, anchor: page * capacity, search: searchTerm, scroll: body.scrollTop };
                 page = 0;
-                searchTerm = '';
                 renderCatalog();
                 body.scrollTop = 0;
               });

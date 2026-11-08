@@ -16,9 +16,12 @@ import org.json.JSONObject;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.Collections;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -32,8 +35,12 @@ final class SharedStylePacks {
             "https://raw.githubusercontent.com/oju706/nai-pocket-library/main/resource-packs/artist.json");
     private static final int MAX_INDEX = 4 * 1024 * 1024;
     private static final int MAX_IMAGE = 12 * 1024 * 1024;
+    private static final int MAX_MODELS = 256 * 1024;
+    private static final String MODELS_ASSET = "community-style-models.json";
+    private static final String UNLABELED_MODEL = "未标注";
     private static final int READ = Intent.FLAG_GRANT_READ_URI_PERMISSION;
     private static final String SOURCE_PREFIX = "https://arca.live/b/aiart/";
+    private final Context context;
     private final ContentResolver resolver;
     private final SharedPreferences saved;
     private final PackPhotoCache cache;
@@ -41,8 +48,9 @@ final class SharedStylePacks {
     private volatile Catalog remote;
 
     SharedStylePacks(Context context, PackPhotoCache cache) {
-        resolver = context.getContentResolver();
-        saved = context.getSharedPreferences("shared-style-pack", Context.MODE_PRIVATE);
+        this.context = context.getApplicationContext();
+        resolver = this.context.getContentResolver();
+        saved = this.context.getSharedPreferences("shared-style-pack", Context.MODE_PRIVATE);
         this.cache = cache;
     }
 
@@ -130,6 +138,7 @@ final class SharedStylePacks {
                 .digest((online.sourceUrl + "\n" + digest).getBytes(StandardCharsets.UTF_8)));
         String previewRoute = online == null ? PREVIEW_ROUTE : REMOTE_PREVIEW_ROUTE;
         String originalRoute = online == null ? ORIGINAL_ROUTE : REMOTE_ORIGINAL_ROUTE;
+        Map<String, String> models = readModels(digest);
         JSONArray images = new JSONArray();
         Map<String, Photo> photos = new LinkedHashMap<>();
         for (int i = 0; i < files.length(); i++) {
@@ -147,7 +156,8 @@ final class SharedStylePacks {
             photos.put(id, new Photo(file, sha));
             String path = "/" + revision + "/" + id;
             images.put(new JSONObject().put("id", id).put("title", "原帖 " + postId + " · 图 " + id)
-                    .put("section", "artist").put("rating", "unknown").put("model", "模型见生成信息")
+                    .put("section", "artist").put("rating", "unknown")
+                    .put("model", models.getOrDefault(id, UNLABELED_MODEL))
                     .put("bytes", file.bytes).put("source", post).put("postId", postId)
                     .put("thumbnail", "/" + previewRoute + path).put("original", "/" + originalRoute + path));
         }
@@ -166,7 +176,7 @@ final class SharedStylePacks {
             String postId = item.source.isEmpty() ? "" : item.source.substring(SOURCE_PREFIX.length());
             String path = "/" + test.revision + "/" + item.id;
             images.put(new JSONObject().put("id", item.id).put("title", item.title)
-                    .put("section", "artist").put("rating", "unknown").put("model", displayModel(item.model))
+                    .put("section", "artist").put("rating", "unknown").put("model", item.model)
                     .put("bytes", item.original.bytes).put("source", item.source).put("postId", postId)
                     .put("thumbnail", "/" + PREVIEW_ROUTE + path).put("original", "/" + ORIGINAL_ROUTE + path));
         }
@@ -174,12 +184,32 @@ final class SharedStylePacks {
         return new Catalog(uri, null, archive, test.revision, photos, index);
     }
 
-    private static String displayModel(String model) {
-        switch (model) {
-            case "nai-diffusion-5-full": return "V5 Full";
-            case "nai-diffusion-5-full-medium": return "V5 Full Medium";
-            case "nai-diffusion-4-5-full": return "V4.5 Full";
-            default: return model;
+    private Map<String, String> readModels(String manifestSha) {
+        try (InputStream input = context.getAssets().open(MODELS_ASSET)) {
+            byte[] raw = NaxLibrary.readBounded(input, MAX_MODELS);
+            JSONObject root = new JSONObject(new String(raw, StandardCharsets.UTF_8));
+            Object boundManifest = root.opt("manifestSha256");
+            if (!"nai-pocket-community-models".equals(root.optString("format"))
+                    || root.optInt("version") != 1 || !(boundManifest instanceof String)
+                    || !manifestSha.equals(boundManifest)) {
+                return Collections.emptyMap();
+            }
+            JSONObject values = root.optJSONObject("models");
+            if (values == null) return Collections.emptyMap();
+            Map<String, String> models = new LinkedHashMap<>();
+            Iterator<String> ids = values.keys();
+            while (ids.hasNext()) {
+                String id = ids.next();
+                Object value = values.opt(id);
+                if (!id.matches("[0-9]{1,16}") || !(value instanceof String)
+                        || ((String) value).trim().isEmpty()) {
+                    return Collections.emptyMap();
+                }
+                models.put(id, (String) value);
+            }
+            return models;
+        } catch (IOException | JSONException failure) {
+            return Collections.emptyMap();
         }
     }
 

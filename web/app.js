@@ -1463,6 +1463,37 @@ function selectedGeneration(data, selected) {
   };
 }
 
+const verifiedModelHashes = new Map([
+  ['0ADF9AB7', 'V5 Full'],
+  ['657484A5', 'V5 Full'],
+  ['70AB5786', 'V5 Full Medium'],
+  ['93F4BD30', 'V5 Full Medium'],
+  ['DB276663', 'V5 精选'],
+  ['4BDE2A90', 'V4.5 Full'],
+  ['1229B44F', 'V4.5 Full'],
+  ['B9F340FD', 'V4.5 Full'],
+  ['F3D95188', 'V4.5 Full'],
+  ['C02D4F98', 'V4.5 精选'],
+]);
+
+function novelAiModelLabel(value, hash = '') {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  const api = /^nai-diffusion-(4-5|[345])(?:-(full|curated)(?:-(small|medium))?)?(?:-(inpainting))?$/i.exec(raw);
+  const name = /^(?:novelai diffusion\s+(?:anime\s+)?)?v(4\.5|[345])(?=$|[\s(（-])/i.exec(raw);
+  const version = api ? `V${api[1].replace('-', '.')}` : name ? `V${name[1]}` : '';
+  const variant = api?.[2] || (name && /\b(full|curated)\b|精选/i.exec(raw)?.[0]);
+  if (variant) {
+    const base = variant.toLowerCase() === 'full' ? 'Full' : '精选';
+    const size = api?.[3] || /\b(small|medium)\b/i.exec(raw)?.[0];
+    const inpainting = api?.[4] || /\binpainting\b/i.test(raw);
+    return `${version} ${base}${size ? ' ' + size[0].toUpperCase() + size.slice(1).toLowerCase() : ''}${inpainting ? ' · 局部重绘' : ''}`;
+  }
+  const suffix = /(?:^|\s)([a-f0-9]{8})$/i.exec(raw)?.[1];
+  const known = verifiedModelHashes.get(String(suffix || hash).toUpperCase());
+  if (known && (!version || known.startsWith(`${version} `))) return known;
+  return version ? `${version}（型号未核实）` : '未标注';
+}
+
 const parameterLabels = {
   model: '模型', sampler: '采样器', steps: '步数', seed: '种子',
   width: '宽度', height: '高度', scale: '提示词引导（CFG）', cfg_rescale: '引导重缩放',
@@ -1587,8 +1618,13 @@ function showPromptImport(data, { back = null, galleryItem = null, resourcePhoto
     const settings = node('section', 'tool-section');
     settings.append(node('h2', '', '生成参数'));
     const facts = node('dl', 'metadata-facts');
+    const model = novelAiModelLabel(params.model || params.model_name, params.model_hash);
+    appendCopyFact(facts, '模型', model);
     for (const key of new Set(['sampler', 'steps', ...Object.keys(parameterLabels), ...Object.keys(params)])) {
-      appendCopyFact(facts, Object.prototype.hasOwnProperty.call(parameterLabels, key) ? parameterLabels[key] : key,
+      if (key === 'model' && params.model === model) continue;
+      const label = key === 'model' ? '原始模型标识' :
+        Object.prototype.hasOwnProperty.call(parameterLabels, key) ? parameterLabels[key] : key;
+      appendCopyFact(facts, label,
         Object.prototype.hasOwnProperty.call(params, key) ? params[key] : undefined,
         ['sampler', 'steps'].includes(key) ? '原图未记录' : undefined, true);
     }

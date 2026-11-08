@@ -1,8 +1,8 @@
 {
-  "versionCode": 11,
-  "versionName": "1.3.7",
+  "versionCode": 12,
+  "versionName": "1.3.8",
   "file": "NAI-Pocket-Library.apk",
-  "bytes": 1082549,
-  "sha256": "4b639b2e068bc36228d46c2676ab4f12e50de5a4753a7ae7a9b59dcef23c95e8",
-  "notes": "画师、同人角色、知识库、个人词库和本地原图图库统一支持上一页、下一页和指定页码跳转。查看详情返回保留当前页。"
+  "bytes": 1099013,
+  "sha256": "1939f80cb1a07fc79748ee0f1b1b847fa7018725515b7cf9af5601113dda37a4",
+  "notes": "在线和本地社区图包支持按模型及 Full、精选等型号筛选，生成参数保留原始模型标识。"
 }
