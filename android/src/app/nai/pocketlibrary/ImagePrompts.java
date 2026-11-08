@@ -64,6 +64,7 @@ final class ImagePrompts {
     private boolean busy;
     private int requestId;
     private Uri lastOriginal;
+    private volatile JSONObject lastSummary;
 
     ImagePrompts(Activity activity, Result result) {
         this.activity = activity;
@@ -73,11 +74,12 @@ final class ImagePrompts {
     boolean isBusy() { return busy; }
 
     Uri lastOriginal() { return lastOriginal; }
+    JSONObject lastSummary() { return lastSummary; }
 
-    private boolean begin(int id) {
+    private boolean begin(int id, Result destination) {
         if (destroyed) return false;
         if (busy) {
-            result.complete(id, null, "已有原图正在读取。");
+            destination.complete(id, null, "已有原图正在读取。");
             return false;
         }
         busy = true;
@@ -86,15 +88,25 @@ final class ImagePrompts {
     }
 
     void readImagePrompts(int id) {
-        if (!begin(id)) return;
+        if (!begin(id, result)) return;
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
-                .setType("image/*").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                .setType("image/*").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
         try { activity.startActivityForResult(intent, PICK); }
-        catch (RuntimeException failure) { finish(null, "无法打开图片文件选择器。"); }
+        catch (RuntimeException failure) { finish(result, null, "无法打开图片文件选择器。"); }
     }
 
-    void readGallery(int id, File file) {
-        if (begin(id)) inspect(() -> new FileInputStream(file), false);
+    void readGallery(int id, File file, Result destination) {
+        if (begin(id, destination)) inspect(() -> new FileInputStream(file), false, destination);
+    }
+
+    void readGallery(int id, Uri uri, Result destination) {
+        if (begin(id, destination)) {
+            inspect(() -> activity.getContentResolver().openInputStream(uri), false, destination);
+        }
+    }
+
+    void readPhoto(int id, byte[] bytes) {
+        if (begin(id, result)) inspect(() -> new ByteArrayInputStream(bytes), false, result);
     }
 
     boolean handleActivityResult(int code, int response, Intent data) {
@@ -102,19 +114,20 @@ final class ImagePrompts {
         if (!busy || destroyed) return true;
         Uri uri = data == null ? null : data.getData();
         if (response != Activity.RESULT_OK || uri == null) {
-            finish(null, null);
+            finish(result, null, null);
             return true;
         }
         if (!"content".equals(uri.getScheme())) {
-            finish(null, "请选择手机文件中的原图。");
+            finish(result, null, "请选择手机文件中的原图。");
             return true;
         }
         lastOriginal = uri;
-        inspect(() -> activity.getContentResolver().openInputStream(uri), true);
+        lastSummary = null;
+        inspect(() -> activity.getContentResolver().openInputStream(uri), true, result);
         return true;
     }
 
-    private void inspect(ImageInput source, boolean includePreview) {
+    private void inspect(ImageInput source, boolean includePreview, Result destination) {
         worker.execute(() -> {
             try (InputStream input = source.open()) {
                 if (input == null) throw new IOException("无法读取这张原图。");
@@ -151,9 +164,10 @@ final class ImagePrompts {
                     if (preview != null) summary.put("preview", preview);
                 }
                 if (summary.toString().length() > 3 * MAX_FIELD) throw new IOException("这张图的生成信息过大，无法在预览页完整显示。");
-                finish(summary, null);
+                if (includePreview) lastSummary = summary;
+                finish(destination, summary, null);
             } catch (Exception failure) {
-                finish(null, failure instanceof IOException && failure.getMessage() != null
+                finish(destination, null, failure instanceof IOException && failure.getMessage() != null
                         ? failure.getMessage() : "无法读取原图提示词，请选择未经转存压缩的原图。");
             } finally { activeStream = null; }
         });
@@ -560,6 +574,8 @@ final class ImagePrompts {
     }
 
     private static String exifFieldName(int tag, boolean exifIfd) {
+        // Some WebP encoders store UserComment in the root IFD.
+        if (tag == 0x9286) return "UserComment";
         if (!exifIfd) {
             if (tag == 0x010e) return "ImageDescription";
             if (tag == 0x010f) return "Make";
@@ -570,8 +586,6 @@ final class ImagePrompts {
             if (tag == 0x9c9c) return "XPComment";
             if (tag == 0x9c9e) return "XPTitle";
             if (tag == 0x9c9f) return "XPSubject";
-        } else {
-            if (tag == 0x9286) return "UserComment";
         }
         return null;
     }
@@ -588,12 +602,27 @@ final class ImagePrompts {
         if (length == 0) return "";
         String marker = new String(data, start, Math.min(8, length), StandardCharsets.ISO_8859_1);
         if (marker.startsWith("ASCII")) return stripNul(decodeUtf8Loose(data, start + 8, length - 8));
-        if (marker.startsWith("UNICODE")) return decodeUtf16Loose(data, start + 8, length - 8, false);
+        if (marker.startsWith("UNICODE")) {
+            int offset = start + 8;
+            boolean little = startsWithLittleEndianJson(data, offset, start + length);
+            return decodeUtf16Loose(data, offset, length - 8, little);
+        }
         if (marker.startsWith("JIS")) {
             try { return stripNul(new String(data, start + 8, length - 8, "ISO-2022-JP")); }
             catch (java.io.UnsupportedEncodingException ignored) { return ""; }
         }
         return stripNul(decodeUtf8Loose(data, start, length));
+    }
+
+    private static boolean startsWithLittleEndianJson(byte[] data, int offset, int end) {
+        // Preserve the existing fallback for comments with no BOM or identifiable JSON prefix.
+        while (offset + 1 < end && data[offset + 1] == 0) {
+            byte character = data[offset];
+            if (character == '{') return true;
+            if (character != ' ' && character != '\t' && character != '\n' && character != '\r') return false;
+            offset += 2;
+        }
+        return false;
     }
 
     private static String decodeExifText(byte[] data, int start, int length) {
@@ -1240,12 +1269,12 @@ final class ImagePrompts {
         return "";
     }
 
-    private void finish(Object value, String error) {
+    private void finish(Result destination, Object value, String error) {
         activity.runOnUiThread(() -> {
             if (destroyed || !busy) return;
             int id = requestId;
             busy = false;
-            result.complete(id, value, error);
+            destination.complete(id, value, error);
         });
     }
 

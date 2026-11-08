@@ -22,14 +22,15 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
 
+import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
-import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -44,11 +45,14 @@ public final class MainActivity extends Activity {
     private static final int PICK_IMAGE = 31;
     private static final int PICK_PACK = 32;
     private static final int PICK_GALLERY = 33;
+    private static final int PICK_ONLINE_EXPORT = 34;
+    private static final int PICK_SHARED_STYLE = 35;
     private static final int GALLERY_BATCH_LIMIT = 40;
     private static final int COPY_LIMIT = 256 * 1024;
     private static final int PAPER = Color.rgb(246, 244, 237);
     private final ExecutorService files = Executors.newSingleThreadExecutor();
     private final ExecutorService updateChecks = Executors.newSingleThreadExecutor();
+    private final OnlinePacks onlinePacks = new OnlinePacks();
     private int picker;
     private int pickerRequest;
     private boolean remotePackImport;
@@ -59,11 +63,13 @@ public final class MainActivity extends Activity {
     private KoreanLibrary korean33000;
     private KoreanLibrary korean55000;
     private LocalPacks packs;
+    private SharedStylePacks sharedStyles;
     private AppUpdates updates;
     private AppUpdateInstaller installer;
     private LibraryBackup backup;
     private ImagePrompts imagePrompts;
     private GalleryStore gallery;
+    private OnlinePacks.Export onlineExport;
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
@@ -73,6 +79,8 @@ public final class MainActivity extends Activity {
         korean33000 = new KoreanLibrary(this, "33000");
         korean55000 = new KoreanLibrary(this, "55000");
         packs = new LocalPacks(this);
+        sharedStyles = new SharedStylePacks(this);
+        files.execute(() -> OnlinePacks.clearExpiredExports(getCacheDir()));
         updates = new AppUpdates(this);
         installer = new AppUpdateInstaller(this);
         backup = new LibraryBackup(this, this::send);
@@ -132,6 +140,8 @@ public final class MainActivity extends Activity {
             if ("/sources.js".equals(path)) return response("text/javascript", getAssets().open("sources.js"), false);
             if ("/gallery.css".equals(path)) return response("text/css", getAssets().open("gallery.css"), false);
             if ("/gallery.js".equals(path)) return response("text/javascript", getAssets().open("gallery.js"), false);
+            if ("/online-pack.js".equals(path)) return response("text/javascript", getAssets().open("online-pack.js"), false);
+            if ("/online-pack.css".equals(path)) return response("text/css", getAssets().open("online-pack.css"), false);
             if ("/api/korean.json".equals(path)) return response("application/json", koreanPack(url.getQueryParameter("pack")).openIndex(), false);
             if ("/api/korean-status.json".equals(path)) {
                 byte[] status = koreanPack(url.getQueryParameter("pack")).status("1".equals(url.getQueryParameter("check")))
@@ -148,36 +158,50 @@ public final class MainActivity extends Activity {
             }
             List<String> parts = url.getPathSegments();
             if (parts.size() == 2 && "gallery-image".equals(parts.get(0))) {
-                GalleryStore.Entry original = gallery.entry(parts.get(1));
-                if ("1".equals(url.getQueryParameter("thumb"))) {
-                    return response("image/jpeg", new ByteArrayInputStream(gallery.thumbnail(original)), true);
+                GalleryStore.Entry image = gallery.entry(parts.get(1));
+                if ("1".equals(url.getQueryParameter("thumb")) || "1".equals(url.getQueryParameter("preview"))) {
+                    return response("image/jpeg", new ByteArrayInputStream(gallery.preview(image)), false);
                 }
-                return response(original.mime, new FileInputStream(original.file), false);
-            }
-            if (parts.size() == 3 && "korean-image".equals(parts.get(0))) {
-                KoreanLibrary.Preview preview = korean.preview(Long.parseLong(parts.get(1)), Integer.parseInt(parts.get(2)));
-                return response(preview.type, new ByteArrayInputStream(preview.bytes), false);
-            }
-            if (parts.size() == 4 && "korean-image".equals(parts.get(0))) {
-                KoreanLibrary.Preview preview = koreanPack(parts.get(1)).preview(Long.parseLong(parts.get(2)), Integer.parseInt(parts.get(3)));
-                return response(preview.type, new ByteArrayInputStream(preview.bytes), false);
+                return response(image.originalMime, gallery.original(image), false);
             }
             if (parts.size() == 3 && "api".equals(parts.get(0)) && "pack".equals(parts.get(1)) && parts.get(2).endsWith(".json")) {
                 String file = parts.get(2);
                 return response("application/json", packs.openIndex(file.substring(0, file.length() - 5)), false);
             }
-            if (parts.size() == 3 && "nax-image".equals(parts.get(0))) {
-                return response("image/webp", nax.openPreview(parts.get(1), parts.get(2)), true);
-            }
-            if (parts.size() == 4 && "pack-image".equals(parts.get(0))) {
-                byte[] bytes = packs.image(parts.get(1), Long.parseLong(parts.get(2)), Integer.parseInt(parts.get(3)));
-                String type = NaxLibrary.imageType(bytes);
-                if (type != null) return response(type, new ByteArrayInputStream(bytes), false);
-            }
+            WebResourceResponse photo = libraryPhoto(parts);
+            if (photo != null) return photo;
         } catch (Exception ignored) {
             return unavailable();
         }
         return unavailable();
+    }
+
+    private WebResourceResponse libraryPhoto(List<String> parts) throws IOException, JSONException {
+        int count = parts.size();
+        if (count == 3 && ("online-pack-image".equals(parts.get(0)) || "online-pack-thumb".equals(parts.get(0)))) {
+            boolean thumbnail = "online-pack-thumb".equals(parts.get(0));
+            byte[] bytes = onlinePacks.photo(parts.get(1), parts.get(2), thumbnail);
+            return response(NaxLibrary.imageType(bytes), new ByteArrayInputStream(bytes), false);
+        }
+        if (count == 3 && (SharedStylePacks.ORIGINAL_ROUTE.equals(parts.get(0)) || SharedStylePacks.PREVIEW_ROUTE.equals(parts.get(0)))) {
+            boolean thumbnail = SharedStylePacks.PREVIEW_ROUTE.equals(parts.get(0));
+            byte[] bytes = sharedStyles.photo(parts.get(1), parts.get(2), thumbnail);
+            return response(NaxLibrary.imageType(bytes), new ByteArrayInputStream(bytes), false);
+        }
+        if ((count == 3 || count == 4) && "korean-image".equals(parts.get(0))) {
+            KoreanLibrary pack = count == 3 ? korean : koreanPack(parts.get(1));
+            KoreanLibrary.Preview photo = pack.preview(Long.parseLong(parts.get(count - 2)), Integer.parseInt(parts.get(count - 1)));
+            return response(photo.type, new ByteArrayInputStream(photo.bytes), false);
+        }
+        if (count == 3 && "nax-image".equals(parts.get(0))) {
+            return response("image/webp", nax.openPreview(parts.get(1), parts.get(2)), true);
+        }
+        if (count == 4 && "pack-image".equals(parts.get(0))) {
+            byte[] bytes = packs.image(parts.get(1), Long.parseLong(parts.get(2)), Integer.parseInt(parts.get(3)));
+            String type = NaxLibrary.imageType(bytes);
+            if (type != null) return response(type, new ByteArrayInputStream(bytes), false);
+        }
+        return null;
     }
 
     private static WebResourceResponse response(String type, InputStream content, boolean cached) {
@@ -256,8 +280,68 @@ public final class MainActivity extends Activity {
                         }
                     });
                     return;
+                case "deleteGalleryImage":
+                    if (fileOperationBusy()) {
+                        send(id, null, "已有文件操作正在进行，请稍后再删除。");
+                        return;
+                    }
+                    deleteGalleryImage(id, value);
+                    return;
                 case "importGallery":
                     choose(id, PICK_GALLERY, "image/*");
+                    return;
+                case "openOnlinePack":
+                    files.execute(() -> {
+                        try {
+                            JSONObject catalog = onlinePacks.open(value);
+                            runOnUiThread(() -> send(id, catalog, null));
+                        } catch (IOException | JSONException failure) {
+                            String error = failure instanceof IOException ? failure.getMessage() : "在线图包目录格式不正确。";
+                            runOnUiThread(() -> send(id, null, error == null ? "无法读取在线图包。" : error));
+                        }
+                    });
+                    return;
+                case "openSharedStylePack":
+                    files.execute(() -> {
+                        try {
+                            JSONObject catalog = sharedStyles.open();
+                            runOnUiThread(() -> send(id, catalog, null));
+                        } catch (Exception failure) {
+                            runOnUiThread(() -> send(id, null, sharedStyleError(failure)));
+                        }
+                    });
+                    return;
+                case "importSharedStylePack":
+                    choose(id, PICK_SHARED_STYLE, "*/*");
+                    return;
+                case "forgetSharedStylePack":
+                    if (fileOperationBusy()) {
+                        send(id, null, "正在读取其他图片或文件，请稍后再试。");
+                        return;
+                    }
+                    files.execute(() -> {
+                        try {
+                            sharedStyles.forget();
+                            runOnUiThread(() -> send(id, true, null));
+                        } catch (IOException failure) {
+                            runOnUiThread(() -> send(id, null, failure.getMessage()));
+                        }
+                    });
+                    return;
+                case "saveOnlinePhotos":
+                case "saveSharedStylePhotos":
+                    if (fileOperationBusy()) {
+                        send(id, null, "正在读取其他图片或文件，请稍后再试。");
+                        return;
+                    }
+                    prepareOnlineExport(id, value, "saveSharedStylePhotos".equals(action));
+                    return;
+                case "photoMetadata":
+                    if (fileOperationBusy()) {
+                        send(id, null, "正在读取其他图片或文件，请稍后再试。");
+                        return;
+                    }
+                    readPhotoMetadata(id, value);
                     return;
                 case "galleryMetadata":
                 case "saveLastOriginal":
@@ -369,19 +453,187 @@ public final class MainActivity extends Activity {
         return picker != 0 || remotePackImport || galleryOperation || backup.isBusy() || imagePrompts.isBusy();
     }
 
-    private void readGalleryMetadata(int id, String entryId) {
+    private void prepareOnlineExport(int id, String selection, boolean sharedStyle) {
         galleryOperation = true;
         files.execute(() -> {
             try {
-                File original = gallery.entry(entryId).file;
+                OnlinePacks.Export export = sharedStyle ? sharedStyles.prepareExport(selection, getCacheDir())
+                        : onlinePacks.prepareExport(selection, getCacheDir());
                 runOnUiThread(() -> {
                     galleryOperation = false;
-                    if (web != null) imagePrompts.readGallery(id, original);
+                    if (web == null || isFinishing()) {
+                        export.file.delete();
+                        return;
+                    }
+                    Intent save = new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+                            .setType(export.mime).putExtra(Intent.EXTRA_TITLE, export.name);
+                    try {
+                        startActivityForResult(save, PICK_ONLINE_EXPORT);
+                        onlineExport = export;
+                        picker = PICK_ONLINE_EXPORT;
+                        pickerRequest = id;
+                    } catch (RuntimeException failure) {
+                        export.file.delete();
+                        send(id, null, "无法打开安卓文件保存窗口。");
+                    }
+                });
+            } catch (Exception | OutOfMemoryError failure) {
+                String error = failure instanceof IOException ? failure.getMessage() : "无法准备所选原图，请重试。";
+                runOnUiThread(() -> {
+                    galleryOperation = false;
+                    send(id, null, error == null ? "无法准备所选原图，请重试。" : error);
+                });
+            }
+        });
+    }
+
+    private void finishOnlineExport(int id, Uri uri) {
+        OnlinePacks.Export export = onlineExport;
+        onlineExport = null;
+        if (uri == null || !"content".equals(uri.getScheme()) || export == null) {
+            if (export != null) export.file.delete();
+            picker = 0;
+            send(id, null, null);
+            return;
+        }
+        files.execute(() -> {
+            String error = null;
+            try (OutputStream output = getContentResolver().openOutputStream(uri, "w")) {
+                if (output == null) throw new IOException("无法写入所选位置。");
+                Files.copy(export.file.toPath(), output);
+            } catch (Exception failure) {
+                error = "保存原图失败，请检查手机空间并重试。";
+            } finally {
+                export.file.delete();
+            }
+            String message = error;
+            runOnUiThread(() -> {
+                picker = 0;
+                send(id, message == null ? true : null, message);
+            });
+        });
+    }
+
+    private void readPhotoMetadata(int id, String reference) {
+        Uri uri = Uri.parse(reference);
+        if (reference.length() > 2048 || !reference.startsWith("/") || reference.startsWith("//")
+                || uri.getAuthority() != null || uri.getFragment() != null) {
+            send(id, null, "这张图没有有效的图包引用。");
+            return;
+        }
+        galleryOperation = true;
+        files.execute(() -> {
+            try {
+                WebResourceResponse photo = libraryPhoto(uri.getPathSegments());
+                if (photo == null) throw new IOException("无法打开图包样图。");
+                byte[] bytes;
+                try (InputStream input = photo.getData()) {
+                    bytes = NaxLibrary.readBounded(input, ImagePrompts.MAX_INPUT);
+                }
+                runOnUiThread(() -> {
+                    galleryOperation = false;
+                    if (web != null) imagePrompts.readPhoto(id, bytes);
+                });
+            } catch (Exception | OutOfMemoryError failure) {
+                runOnUiThread(() -> {
+                    galleryOperation = false;
+                    send(id, null, "图包样图暂时无法读取，请重试。");
+                });
+            }
+        });
+    }
+
+    private void readGalleryMetadata(int id, String entryId) {
+        galleryOperation = true;
+        files.execute(() -> {
+            GalleryStore.Entry entry;
+            JSONObject cached = null;
+            try {
+                entry = gallery.entry(entryId);
+                try {
+                    cached = gallery.cachedPrompt(entryId);
+                } catch (Exception ignored) {
+                    // A damaged cache must not prevent trying the still-readable source.
+                }
+            } catch (Exception failure) {
+                String message = failure instanceof IOException && failure.getMessage() != null
+                        ? failure.getMessage() : "无法打开图库条目。";
+                runOnUiThread(() -> finishGalleryMetadata(id, null, message));
+                return;
+            }
+            if (cached != null) {
+                JSONObject summary = cached;
+                runOnUiThread(() -> finishGalleryMetadata(id, summary, null));
+                return;
+            }
+
+            GalleryStore.Entry source = entry;
+            runOnUiThread(() -> {
+                if (web == null) {
+                    galleryOperation = false;
+                    return;
+                }
+                ImagePrompts.Result completion = (resultId, value, error) -> {
+                    JSONObject summary = value instanceof JSONObject ? (JSONObject)value : null;
+                    if (error != null || summary == null) {
+                        finishGalleryMetadata(id, null, error == null
+                                ? "无法读取这张原图的生成信息。" : error);
+                        return;
+                    }
+                    cacheGalleryMetadata(id, entryId, summary);
+                };
+                try {
+                    if (source.originalFile != null) {
+                        imagePrompts.readGallery(id, source.originalFile, completion);
+                    } else if (source.sourceUri != null) {
+                        imagePrompts.readGallery(id, source.sourceUri, completion);
+                    } else {
+                        finishGalleryMetadata(id, null, "手机原图已不可读取，图库中只有预览。");
+                    }
+                } catch (RuntimeException failure) {
+                    finishGalleryMetadata(id, null, "手机原图已移动或读取权限已失效，仍可查看缓存预览。");
+                }
+            });
+        });
+    }
+
+    private void cacheGalleryMetadata(int id, String entryId, JSONObject summary) {
+        files.execute(() -> {
+            boolean cached = false;
+            try {
+                cached = gallery.savePrompt(entryId, summary);
+            } catch (Exception ignored) {
+                // The current session can still show the parsed result if the small cache fails.
+            }
+            try {
+                summary.put("promptCached", cached);
+            } catch (Exception ignored) {
+                // Keep the original parsed object as-is.
+            }
+            runOnUiThread(() -> finishGalleryMetadata(id, summary, null));
+        });
+    }
+
+    private void finishGalleryMetadata(int id, JSONObject value, String error) {
+        galleryOperation = false;
+        send(id, value, error);
+    }
+
+    private void deleteGalleryImage(int id, String entryId) {
+        galleryOperation = true;
+        files.execute(() -> {
+            try {
+                boolean deleted = gallery.delete(entryId);
+                runOnUiThread(() -> {
+                    galleryOperation = false;
+                    send(id, deleted, null);
                 });
             } catch (Exception failure) {
+                String message = failure instanceof IOException && failure.getMessage() != null
+                        ? failure.getMessage() : "无法从图库删除这个条目，请重试。";
                 runOnUiThread(() -> {
                     galleryOperation = false;
-                    send(id, null, "无法打开图库中的原图。");
+                    send(id, null, message);
                 });
             }
         });
@@ -389,6 +641,7 @@ public final class MainActivity extends Activity {
 
     private void saveLastOriginal(int id) {
         Uri uri = imagePrompts.lastOriginal();
+        JSONObject summary = imagePrompts.lastSummary();
         if (uri == null) {
             send(id, null, "请先选择一张原图。");
             return;
@@ -397,6 +650,13 @@ public final class MainActivity extends Activity {
         files.execute(() -> {
             try {
                 JSONObject saved = gallery.save(uri);
+                if (summary != null) {
+                    try {
+                        saved.put("promptCached", gallery.savePrompt(saved.getString("id"), summary));
+                    } catch (Exception ignored) {
+                        // The preview is saved even if generation info exceeds the cache limit.
+                    }
+                }
                 runOnUiThread(() -> {
                     galleryOperation = false;
                     send(id, saved, null);
@@ -441,6 +701,10 @@ public final class MainActivity extends Activity {
         if (backup.handleActivityResult(code, result, data) || imagePrompts.handleActivityResult(code, result, data)) return;
         if (picker != code) return;
         int id = pickerRequest;
+        if (code == PICK_ONLINE_EXPORT) {
+            finishOnlineExport(id, result == RESULT_OK && data != null ? data.getData() : null);
+            return;
+        }
         if (code == PICK_GALLERY) {
             if (result != RESULT_OK || data == null) finishGalleryImport(id, null, null);
             else importGallery(id, data);
@@ -450,6 +714,17 @@ public final class MainActivity extends Activity {
         if (result != RESULT_OK || uri == null || !"content".equals(uri.getScheme())) {
             picker = 0;
             send(id, null, null);
+            return;
+        }
+        if (code == PICK_SHARED_STYLE) {
+            files.execute(() -> {
+                try {
+                    JSONObject catalog = sharedStyles.mount(uri);
+                    runOnUiThread(() -> { picker = 0; send(id, catalog, null); });
+                } catch (Exception failure) {
+                    runOnUiThread(() -> { picker = 0; send(id, null, sharedStyleError(failure)); });
+                }
+            });
             return;
         }
         files.execute(() -> {
@@ -527,6 +802,11 @@ public final class MainActivity extends Activity {
                 ? failure.getMessage() : "无法读取所选原图，请从手机文件中重新选择。";
     }
 
+    private static String sharedStyleError(Exception failure) {
+        return failure instanceof IOException && failure.getMessage() != null
+                ? failure.getMessage() : "无法读取社区画风图包，请确认 ZIP 格式并重新选择。";
+    }
+
     private JSONObject importPack(Uri uri) throws Exception {
         boolean alreadyGranted = getContentResolver().getPersistedUriPermissions().stream()
                 .anyMatch(permission -> permission.isReadPermission() && uri.equals(permission.getUri()));
@@ -598,6 +878,7 @@ public final class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         files.shutdownNow();
+        if (onlineExport != null) onlineExport.file.delete();
         updateChecks.shutdownNow();
         if (backup != null) backup.cancelOnDestroy();
         if (imagePrompts != null) imagePrompts.cancelOnDestroy();

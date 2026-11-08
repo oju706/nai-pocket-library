@@ -1,0 +1,202 @@
+package app.nai.pocketlibrary;
+
+import android.content.ContentResolver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.graphics.Bitmap;
+import android.graphics.ImageDecoder;
+import android.net.Uri;
+import android.os.ParcelFileDescriptor;
+
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+/** Mounts the community style archive through Android's file picker without unpacking it. */
+final class SharedStylePacks {
+    static final String ORIGINAL_ROUTE = "shared-style-image";
+    static final String PREVIEW_ROUTE = "shared-style-thumb";
+    private static final int MAX_INDEX = 4 * 1024 * 1024;
+    private static final int MAX_IMAGE = 12 * 1024 * 1024;
+    private static final int READ = Intent.FLAG_GRANT_READ_URI_PERMISSION;
+    private static final String SOURCE_PREFIX = "https://arca.live/b/aiart/";
+    private final ContentResolver resolver;
+    private final SharedPreferences saved;
+    private volatile Catalog current;
+
+    SharedStylePacks(Context context) {
+        resolver = context.getContentResolver();
+        saved = context.getSharedPreferences("shared-style-pack", Context.MODE_PRIVATE);
+    }
+
+    JSONObject open() throws IOException, JSONException {
+        Catalog catalog = current;
+        if (catalog != null) return catalog.index;
+        String previous = saved.getString("uri", "");
+        if (previous.isEmpty()) return null;
+        current = readCatalog(Uri.parse(previous));
+        return current.index;
+    }
+
+    JSONObject mount(Uri uri) throws IOException, JSONException {
+        Catalog next = readCatalog(uri);
+        String previous = saved.getString("uri", "");
+        boolean same = uri.toString().equals(previous);
+        boolean owned = saved.getBoolean("owned", false);
+        boolean alreadyGranted = resolver.getPersistedUriPermissions().stream()
+                .anyMatch(permission -> permission.isReadPermission() && uri.equals(permission.getUri()));
+        if (!alreadyGranted) resolver.takePersistableUriPermission(uri, READ);
+        if (!saved.edit().putString("uri", uri.toString()).putBoolean("owned", !alreadyGranted || (same && owned)).commit()) {
+            if (!alreadyGranted) release(uri);
+            throw new IOException("无法保存图包位置。");
+        }
+        current = next;
+        if (owned && !same && !previous.isEmpty()) release(Uri.parse(previous));
+        return next.index;
+    }
+
+    void forget() throws IOException {
+        String uri = saved.getString("uri", "");
+        boolean owned = saved.getBoolean("owned", false);
+        if (!saved.edit().clear().commit()) throw new IOException("无法移除图包位置。");
+        current = null;
+        if (owned && !uri.isEmpty()) release(Uri.parse(uri));
+    }
+
+    private void release(Uri uri) {
+        try { resolver.releasePersistableUriPermission(uri, READ); }
+        catch (SecurityException ignored) { /* A moved file may no longer have a grant. */ }
+    }
+
+    private Catalog readCatalog(Uri uri) throws IOException, JSONException {
+        try (ParcelFileDescriptor.AutoCloseInputStream input = openFile(uri)) {
+            SharedStyleZip archive = SharedStyleZip.open(input.getChannel());
+            SharedStyleZip.Entry manifest = archive.get("manifest.json");
+            if (manifest == null) throw new IOException("ZIP 中没有社区画风图包目录。");
+            byte[] raw = archive.read(input.getChannel(), manifest, MAX_INDEX);
+            JSONObject data = new JSONObject(new String(raw, StandardCharsets.UTF_8));
+            JSONArray files = data.getJSONArray("files");
+            if (!"naimakeartistgroup-shared-images".equals(data.optString("format")) || data.optInt("version") != 2
+                    || files.length() < 1 || files.length() > 10000 || files.length() != data.optInt("file_count")) {
+                throw new IOException("请选择 NAImakeArtistGroup 的社区画风图包 ZIP。");
+            }
+            String revision = OnlinePacks.hex(OnlinePacks.sha256().digest(raw));
+            JSONArray images = new JSONArray();
+            Map<String, Photo> photos = new LinkedHashMap<>();
+            for (int i = 0; i < files.length(); i++) {
+                JSONObject row = files.getJSONObject(i);
+                String id = row.getString("image_id");
+                String name = row.getString("name");
+                String sha = row.getString("sha256");
+                String source = row.getString("source_url");
+                if (!id.matches("[0-9]{1,16}") || !name.matches("[a-f0-9]{64}\\.webp")
+                        || !sha.matches("[a-f0-9]{64}") || !source.startsWith(SOURCE_PREFIX)) throw invalidRow(i);
+                String postId = source.substring(SOURCE_PREFIX.length());
+                SharedStyleZip.Entry file = archive.get("arca_style_images/" + name);
+                if (!postId.matches("[0-9]{1,16}") || photos.containsKey(id) || file == null
+                        || file.bytes < 12 || file.bytes > MAX_IMAGE || file.bytes != row.optLong("bytes")) throw invalidRow(i);
+                photos.put(id, new Photo(file, sha));
+                String path = "/" + revision + "/" + id;
+                images.put(new JSONObject().put("id", id).put("title", "原帖 " + postId + " · 图 " + id)
+                        .put("section", "artist").put("rating", "unknown").put("model", "模型见生成信息")
+                        .put("bytes", file.bytes).put("source", source).put("postId", postId)
+                        .put("thumbnail", "/" + PREVIEW_ROUTE + path).put("original", "/" + ORIGINAL_ROUTE + path));
+            }
+            JSONObject index = new JSONObject().put("title", "Arca Live 社区画风合集")
+                    .put("revision", revision).put("images", images);
+            return new Catalog(uri, archive, revision, photos, index);
+        }
+    }
+
+    byte[] photo(String revision, String id, boolean thumbnail) throws IOException {
+        Catalog catalog = catalog(revision);
+        byte[] bytes = original(catalog, id);
+        if (!thumbnail) return bytes;
+        Bitmap image = ImageDecoder.decodeBitmap(ImageDecoder.createSource(ByteBuffer.wrap(bytes)), (decoder, info, source) -> {
+            int width = info.getSize().getWidth();
+            int height = info.getSize().getHeight();
+            double scale = Math.min(1, 420.0 / Math.max(width, height));
+            decoder.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE);
+            decoder.setTargetSize(Math.max(1, (int) (width * scale)), Math.max(1, (int) (height * scale)));
+        });
+        try (ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            if (!image.compress(Bitmap.CompressFormat.JPEG, 76, output)) throw new IOException("无法生成缩略图。");
+            return output.toByteArray();
+        } finally {
+            image.recycle();
+        }
+    }
+
+    OnlinePacks.Export prepareExport(String request, File cache) throws IOException, JSONException {
+        JSONObject selection = new JSONObject(request);
+        Catalog catalog = catalog(selection.getString("revision"));
+        return OnlinePacks.export(selection, cache, id -> {
+            Photo image = catalog.photos.get(id);
+            return image == null ? 0 : image.entry.bytes;
+        }, id -> original(catalog, id));
+    }
+
+    private byte[] original(Catalog catalog, String id) throws IOException {
+        Photo photo = catalog.photos.get(id);
+        if (photo == null) throw new IOException("这张图片不在已选图包中。");
+        try (ParcelFileDescriptor.AutoCloseInputStream input = openFile(catalog.uri)) {
+            byte[] bytes = catalog.archive.read(input.getChannel(), photo.entry, MAX_IMAGE);
+            if (!"image/webp".equals(NaxLibrary.imageType(bytes))
+                    || !photo.sha.equals(OnlinePacks.hex(OnlinePacks.sha256().digest(bytes)))) {
+                throw new IOException("图片与图包目录不符，请重新选择完整 ZIP。");
+            }
+            return bytes;
+        }
+    }
+
+    private ParcelFileDescriptor.AutoCloseInputStream openFile(Uri uri) throws IOException {
+        if (!"content".equals(uri.getScheme())) throw new IOException("请从安卓文件窗口选择本地 ZIP。");
+        try {
+            ParcelFileDescriptor descriptor = resolver.openFileDescriptor(uri, "r");
+            if (descriptor != null) return new ParcelFileDescriptor.AutoCloseInputStream(descriptor);
+        } catch (IOException | SecurityException failure) {
+            throw new IOException("原 ZIP 无法打开，请确认文件仍在手机并重新选择。", failure);
+        }
+        throw new IOException("原 ZIP 无法打开，请重新选择。");
+    }
+
+    private Catalog catalog(String revision) throws IOException {
+        Catalog catalog = current;
+        if (catalog == null || !catalog.revision.equals(revision)) throw new IOException("图包已更换，请重新打开。");
+        return catalog;
+    }
+
+    private static IOException invalidRow(int index) {
+        return new IOException("社区图包第 " + (index + 1) + " 张图片与目录不符。");
+    }
+
+    private static final class Catalog {
+        final Uri uri;
+        final SharedStyleZip archive;
+        final String revision;
+        final Map<String, Photo> photos;
+        final JSONObject index;
+        Catalog(Uri uri, SharedStyleZip archive, String revision, Map<String, Photo> photos, JSONObject index) {
+            this.uri = uri;
+            this.archive = archive;
+            this.revision = revision;
+            this.photos = photos;
+            this.index = index;
+        }
+    }
+
+    private static final class Photo {
+        final SharedStyleZip.Entry entry;
+        final String sha;
+        Photo(SharedStyleZip.Entry entry, String sha) { this.entry = entry; this.sha = sha; }
+    }
+}

@@ -101,7 +101,7 @@ function galleryEmptyState() {
   const empty = node('div', 'nai-gallery-empty');
   empty.append(
     node('h2', '', '还没有保存原图'),
-    node('p', '', '从 NovelAI 保存并下载的原图会留在本机。导入后可在这里查看原图和生成信息。'),
+    node('p', '', '导入后，本机图库会保留小预览。查看过的生成信息也可在本机保存。'),
   );
   return empty;
 }
@@ -161,11 +161,13 @@ async function galleryLoad(session) {
       });
 
     body.replaceChildren();
+    const used = items.reduce((sum, item) => sum + (Number(item.bytes) || 0), 0);
     const heading = node('section', 'nai-gallery-heading');
     heading.append(
       node('p', 'nai-gallery-eyebrow', '仅保存在此设备'),
-      node('h2', '', `本地原图 · ${items.length} 张`),
-      node('p', 'nai-gallery-note', '按保存时间从新到旧排列。点按缩略图查看原图与生成信息。'),
+      node('h2', '', `本地图库 · ${items.length} / 2,000 张`),
+      node('p', 'nai-gallery-note', `图片与生成信息占用 ${galleryFormatBytes(used)} / 1 GB`),
+      node('p', 'nai-gallery-note', '新导入的图片只保存小预览。已经读取并保存的生成信息可离线查看。'),
     );
     body.append(heading);
 
@@ -225,7 +227,13 @@ function galleryDetailImage(item) {
   const controls = node('div', 'nai-gallery-image-controls');
   stage.append(frame, controls);
 
+  const previewEntry = item.kind === 'preview';
+  let showOriginal = !previewEntry;
   let naturalSize = false;
+  const originalToggle = button('打开手机原图', 'nai-gallery-size-toggle', () => {
+    showOriginal = !showOriginal;
+    loadImage();
+  });
   const sizeToggle = button('原始尺寸', 'nai-gallery-size-toggle', () => {
     naturalSize = !naturalSize;
     frame.classList.toggle('nai-gallery-is-natural', naturalSize);
@@ -233,13 +241,21 @@ function galleryDetailImage(item) {
     sizeToggle.setAttribute('aria-pressed', String(naturalSize));
   });
   sizeToggle.setAttribute('aria-pressed', 'false');
+  if (previewEntry && item.sourceLinked) controls.append(originalToggle);
   controls.append(sizeToggle);
 
   function loadImage() {
-    const loading = node('div', 'nai-gallery-image-status', '正在读取完整原图…');
+    const original = showOriginal;
+    naturalSize = false;
+    frame.classList.remove('nai-gallery-is-natural');
+    sizeToggle.hidden = !original;
+    sizeToggle.textContent = '原始尺寸';
+    sizeToggle.setAttribute('aria-pressed', 'false');
+    originalToggle.textContent = original ? '返回小预览' : '打开手机原图';
+    const loading = node('div', 'nai-gallery-image-status', original ? '正在读取完整原图…' : '正在读取小预览…');
     loading.setAttribute('role', 'status');
     const image = node('img', 'nai-gallery-full-image');
-    image.alt = `完整原图：${galleryItemAlt(item)}`;
+    image.alt = `${original ? '完整原图' : '小预览'}：${galleryItemAlt(item)}`;
     image.decoding = 'async';
     image.hidden = true;
     image.addEventListener('load', () => {
@@ -247,12 +263,19 @@ function galleryDetailImage(item) {
       loading.remove();
     });
     image.addEventListener('error', () => {
+      if (image.parentNode !== frame) return;
+      if (original && previewEntry) {
+        showOriginal = false;
+        toast('手机原图已无法读取，已切回小预览。');
+        loadImage();
+        return;
+      }
       const failure = node('div', 'nai-gallery-image-status nai-gallery-image-error');
-      failure.append(node('span', '', '完整原图读取失败。'), button('重试', 'soft', loadImage));
+      failure.append(node('span', '', '图片读取失败。'), button('重试', 'soft', loadImage));
       frame.replaceChildren(failure);
     });
     frame.replaceChildren(loading, image);
-    image.src = galleryImageUrl(item, false);
+    image.src = galleryImageUrl(item, !original);
   }
   loadImage();
   return stage;
@@ -263,7 +286,8 @@ function showGalleryDetail(item) {
   openScreen('原图详情', showGallery);
 
   const date = galleryFormatDate(item.createdAt);
-  const facts = [item.format, galleryFormatBytes(item.bytes), date].filter(Boolean).join(' · ');
+  const type = item.kind === 'preview' ? '小预览' : '旧版完整副本';
+  const facts = [type, item.format, galleryFormatBytes(item.bytes), date].filter(Boolean).join(' · ');
   const heading = node('section', 'nai-gallery-detail-heading');
   heading.append(
     node('h2', '', galleryItemName(item)),
@@ -296,6 +320,27 @@ function showGalleryDetail(item) {
     }
   });
 
+  const remove = button('从图库删除', 'subtle danger compact', async () => {
+    if (session !== gallerySession) return;
+    const message = item.kind === 'preview'
+      ? '删除此条目的小预览和已保存的生成信息？手机原文件会保留。'
+      : '删除 App 内的完整副本和已保存的生成信息？手机原文件会保留。';
+    if (!confirm(message)) return;
+    remove.disabled = true;
+    metadataButton.disabled = true;
+    try {
+      const deleted = await native('deleteGalleryImage', item.id);
+      if (session !== gallerySession) return;
+      showGallery();
+      toast(deleted ? '已从图库删除' : '此条目已不存在');
+    } catch (error) {
+      if (session !== gallerySession) return;
+      toast(error.message || '无法删除，请重试。');
+      remove.disabled = false;
+      metadataButton.disabled = false;
+    }
+  });
+  heading.append(remove);
   actions.replaceChildren(
     button('返回图库', 'soft', () => {
       if (session === gallerySession) showGallery();

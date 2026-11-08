@@ -210,6 +210,8 @@
 .nai-gallery-image-controls {
   display: flex;
   justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .nai-gallery-size-toggle {
