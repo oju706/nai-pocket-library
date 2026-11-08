@@ -18,15 +18,56 @@ const state = {
   section: 'artist', mode: 'online', model: 'V5', kind: 'all', knowledgeTab: 'basic', artistSource: 'korean',
   limit: pageSize, online: null, onlineTask: null, onlineError: false, hasOnline: false,
   personal: [], personalError: false, packs: [], pack: null, packRows: [],
-  packMessage: '', importing: false,
-  korean: null, koreanTask: null, koreanError: false, koreanChecking: false, koreanStatus: '',
+  packMessage: '', importing: false, importingRemote: false,
+  artistGroup: 'all', galleryFocus: false, galleryColumns: 3, artistShuffle: 0, artistOrder: 'name',
+  characterFilters: {},
+  koreanPack: 'all', korean: null, koreanTask: null, koreanError: false, koreanChecking: false, koreanStatus: '',
 };
+const koreanPacks = [['curated', 'Curated 精选'], ['33000', '33000-Q'], ['55000', '55000-Q']];
+const koreanCatalogs = new Map();
 const knowledgeKinds = [['all', '全部'], ...PocketSources.knowledgeKinds];
+const characterFields = [['work', '作品'], ['outfit', '服装／版本'], ['gender', '性别'], ['species', '类型']];
+const genderChoices = [['', '未标注'], ['女性', '女性'], ['男性', '男性'], ['其他', '其他']];
+const speciesChoices = [['', '未标注'], ['人类', '人类'], ['人外', '人外'], ['其他', '其他']];
 let views = { artist: 'grid', character: 'grid', knowledge: 'list' };
 try {
   const saved = JSON.parse(localStorage.getItem('pocket-views') || '{}');
   for (const key of Object.keys(views)) if (['grid', 'list', 'compact'].includes(saved[key])) views[key] = saved[key];
 } catch { /* Default views work when preferences cannot be read. */ }
+
+function searchText(text) {
+  return String(text ?? '').normalize('NFKC').toLocaleLowerCase().replace(/[_\s]+/g, ' ').trim();
+}
+
+function artistGroup(title) {
+  const name = String(title).trim().replace(/^artist:\s*/i, '').normalize('NFKC');
+  const first = Array.from(name)[0] || '';
+  const latin = first.normalize('NFD').replace(/\p{Mark}/gu, '').toUpperCase();
+  if (/^[A-Z]$/.test(latin)) return `letter-${latin}`;
+  if (/^[0-9]$/.test(first)) return `digit-${first}`;
+  if (/\p{Number}/u.test(first)) return 'digit-other';
+  if (/\p{Script=Han}/u.test(first)) return 'han';
+  if (/[\p{Script=Hiragana}\p{Script=Katakana}]/u.test(first)) return 'kana';
+  if (/\p{Script=Hangul}/u.test(first)) return 'hangul';
+  return /\p{Letter}/u.test(first) ? 'other-letter' : 'symbol';
+}
+
+function matchesArtistGroup(card, group) {
+  if (group === 'all') return true;
+  const first = artistGroup(card.title);
+  if (group === 'letters') return first.startsWith('letter-');
+  if (group === 'digits') return first.startsWith('digit-');
+  return first === group;
+}
+
+function shuffleArtists(cards, seed) {
+  let random = seed;
+  for (let i = cards.length - 1; i > 0; i--) {
+    random = (Math.imul(random, 1664525) + 1013904223) >>> 0;
+    const other = random % (i + 1);
+    [cards[i], cards[other]] = [cards[other], cards[i]];
+  }
+}
 function isRemote() {
   return state.mode === 'online' && (state.section === 'knowledge' ? state.knowledgeTab === 'images'
     : state.section === 'artist' ? state.artistSource === 'nax' : true);
@@ -35,22 +76,49 @@ function isRemote() {
 function isKorean() { return state.mode === 'online' && state.section === 'artist' && state.artistSource === 'korean'; }
 
 function ensureKorean() {
-  if (state.korean || state.koreanTask) return;
+  if (state.korean || state.koreanTask?.pack === state.koreanPack) return;
+  const task = { pack: state.koreanPack };
+  const packs = task.pack === 'all' ? koreanPacks.map(([id]) => id) : [task.pack];
   state.koreanError = false;
-  state.koreanTask = getJson('/api/korean.json').then((index) => { state.korean = PocketSources.koreanCards(index); })
-    .catch(() => { state.koreanError = true; })
-    .finally(() => { state.koreanTask = null; renderList(); });
+  state.koreanTask = task;
+  Promise.all(packs.map((id) => {
+    if (!koreanCatalogs.has(id)) {
+      koreanCatalogs.set(id, getJson(`/api/korean.json?pack=${id}`).then(PocketSources.koreanCards).catch((error) => {
+        koreanCatalogs.delete(id);
+        throw error;
+      }));
+    }
+    return koreanCatalogs.get(id);
+  })).then((catalogs) => {
+    if (state.koreanTask !== task) return;
+    const artists = new Map();
+    for (const catalog of catalogs) for (const card of catalog) {
+      if (!artists.has(card.title)) artists.set(card.title, card);
+    }
+    state.korean = [...artists.values()].sort((a, b) => a.title.localeCompare(b.title, 'en'));
+  }).catch(() => { if (state.koreanTask === task) state.koreanError = true; })
+    .finally(() => {
+      if (state.koreanTask === task) { state.koreanTask = null; renderList(); }
+    });
 }
 
 async function checkKorean() {
   if (state.koreanChecking) return;
   state.koreanChecking = true;
+  const selection = state.koreanPack;
   renderList();
   try {
-    const response = await getJson('/api/korean-status.json?check=1');
-    state.koreanStatus = response.message;
-    toast(response.message);
-  } catch { state.koreanStatus = '检查原库失败，请稍后重试。'; toast(state.koreanStatus); }
+    const packs = selection === 'all' ? koreanPacks : koreanPacks.filter(([id]) => id === selection);
+    const status = await Promise.all(packs.map(async ([id, label]) => {
+      try { return [label, await getJson(`/api/korean-status.json?check=1&pack=${id}`)]; }
+      catch { return [label, { status: 'failed' }]; }
+    }));
+    const message = status.every(([, item]) => item.status === 'current') ? '所选韩国图包与目录一致。'
+      : status.filter(([, item]) => item.status !== 'current').map(([label, item]) =>
+        `${label}：${item.message || '暂时无法检查'}`).join('；');
+    if (state.koreanPack === selection) state.koreanStatus = message;
+    toast(message);
+  } catch { toast('检查原库失败，请稍后重试。'); }
   finally { state.koreanChecking = false; renderList(); }
 }
 
@@ -93,18 +161,23 @@ function toast(message) {
 
 const pending = new Map();
 let requestId = 0;
-function native(action, value = null) {
+function native(action, value = null, timeout = 0) {
   return new Promise((resolve, reject) => {
     const id = ++requestId;
     if (!window.Pocket) {
       reject(new Error('请在安卓 App 中使用此功能。'));
       return;
     }
-    pending.set(id, { resolve, reject });
+    const timer = timeout ? setTimeout(() => {
+      pending.delete(id);
+      reject(new Error('系统未回应复制请求。'));
+    }, timeout) : null;
+    pending.set(id, { resolve, reject, timer });
     try {
       window.Pocket.request(JSON.stringify({ id, action, value }));
     } catch (error) {
       pending.delete(id);
+      clearTimeout(timer);
       reject(error);
     }
   });
@@ -114,12 +187,14 @@ window.PocketResult = (id, value, error) => {
   const request = pending.get(id);
   if (!request) return;
   pending.delete(id);
+  clearTimeout(request.timer);
   if (error) request.reject(new Error(error));
   else request.resolve(value);
 };
 
 window.PocketProgress = (percentage) => {
-  state.packMessage = percentage < 0 ? '正在建立索引…' : `正在建立索引 · ${percentage}%`;
+  const phase = state.importingRemote ? (percentage >= 90 ? '正在建立画师目录' : '正在下载并导入 ZIP') : '正在建立索引';
+  state.packMessage = percentage < 0 ? phase + '…' : `${phase} · ${percentage}%`;
   if (state.importing && state.section === 'artist' && state.mode === 'online') renderList();
 };
 
@@ -159,13 +234,31 @@ async function loadPersonal() {
   renderList();
 }
 
-async function copy(prompt) {
+async function copy(value) {
+  const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+  if (!text) return;
+  const revision = screenRevision;
   try {
-    if (window.Pocket) await native('copy', prompt);
-    else await navigator.clipboard.writeText(prompt);
+    if (window.Pocket) {
+      if (await native('copy', text, 4500) !== true) throw new Error('系统未确认复制。');
+    } else {
+      await navigator.clipboard.writeText(text);
+    }
     toast('已复制');
-  } catch (error) {
-    toast(error.message || '复制失败，可以在详情里长按提示词。');
+  } catch {
+    if (revision !== screenRevision) return;
+    if (!screen.open) openScreen('手动复制');
+    body.querySelector('.copy-fallback')?.remove();
+    const fallback = node('section', 'copy-fallback');
+    const field = node('textarea', '');
+    field.readOnly = true;
+    field.value = text;
+    field.setAttribute('aria-label', '待复制内容');
+    fallback.append(node('p', '', '系统未能复制。可长按文本，选择要复制的内容。'), field);
+    body.append(fallback);
+    field.focus();
+    field.select();
+    fallback.scrollIntoView({ block: 'nearest' });
   }
 }
 
@@ -248,13 +341,18 @@ async function selectPack(id) {
   renderList();
 }
 
-async function importPack() {
+async function importPack(address = '') {
   if (state.importing) return;
+  const remote = typeof address === 'string' && address.trim();
+  state.section = 'artist';
+  state.mode = 'online';
+  state.galleryFocus = false;
   state.importing = true;
-  state.packMessage = '请从手机文件中选择已有数据包…';
+  state.importingRemote = Boolean(remote);
+  state.packMessage = remote ? '正在准备下载图包…' : '请选择原版画师数据包或自制 ZIP…';
   render();
   try {
-    const pack = await native('importPack');
+    const pack = await native(remote ? 'importRemotePack' : 'importPack', remote || null);
     state.packMessage = '';
     if (pack) {
       await loadPacks();
@@ -266,8 +364,40 @@ async function importPack() {
     toast(error.message);
   } finally {
     state.importing = false;
+    state.importingRemote = false;
     render();
   }
+}
+
+function showPackSources() {
+  openScreen('更多画师图包');
+  const sources = toolSection('从原作者下载', '在浏览器保存所选图包，再回到这里导入。作者的全量包较大，请按需要选择。');
+  const originalRoot = 'https://huggingface.co/baqu2213/PoemForSmallFThings/blob/main/NAIA/';
+  for (const [title, info, path] of [
+    ['V5 Curated 精选', '约 1.03 GB · 已有在线目录', 'NAID5_artist_thumbnail/NAID5-33000-55000-Curated'],
+    ['V5 33000-Q', '约 4.62 GB', 'NAID5_artist_thumbnail/NAID5F-33000-Q'],
+    ['V5 55000-Q', '约 3.19 GB', 'NAID5_artist_thumbnail/NAID5F-55000-Q'],
+    ['V4.5 31000 版', '约 2.73 GB', 'NAID4.5_artist_thumbnail_31000/artist_thumbnail_nai'],
+  ]) {
+    const row = node('div', 'pack-source');
+    const label = node('div');
+    label.append(node('strong', '', title), node('small', '', info));
+    row.append(label, button('下载页', 'soft compact', () => openLink(originalRoot + path)));
+    sources.append(row);
+  }
+  const zip = toolSection('导入自制 ZIP', '把 JPG、PNG 或 WebP 压缩成 ZIP。单张图片可用画师名作文件名，多张图片可放进以画师名命名的文件夹。');
+  zip.append(button('选择手机上的图包', 'primary', () => { closeScreen(); importPack(); }));
+  const cloud = toolSection('从 GitHub 下载并解压', '填写公开 Release 附件或 raw.githubusercontent.com 的 ZIP 直链。App 下载完成后在本机建立画师目录。');
+  const address = textInput('input', '', 'https://…/我的画师图包.zip', 2048);
+  address.type = 'url';
+  address.autocapitalize = 'off';
+  const download = button('下载并导入 ZIP', 'primary', () => {
+    const value = address.value.trim();
+    if (!value) { toast('请先填写 ZIP 下载地址。'); address.focus(); return; }
+    closeScreen();
+    importPack(value);
+  });
+  cloud.append(field('公开 ZIP 下载地址', address), download);
 }
 
 function chooseSection(section) {
@@ -276,6 +406,10 @@ function chooseSection(section) {
   state.mode = 'online';
   state.kind = 'all';
   state.model = 'V5';
+  state.galleryFocus = false;
+  state.artistGroup = 'all';
+  state.artistShuffle = 0;
+  state.characterFilters = {};
   if (section === 'artist') state.artistSource = 'korean';
   if (state.hasOnline && isRemote()) ensureOnline();
   resetResults();
@@ -285,6 +419,9 @@ function chooseMode(mode) {
   if (mode === state.mode) return;
   state.mode = mode;
   state.kind = 'all';
+  state.artistGroup = 'all';
+  state.artistShuffle = 0;
+  state.characterFilters = {};
   if (isRemote() && state.hasOnline) ensureOnline();
   resetResults();
 }
@@ -302,6 +439,93 @@ function chip(label, selected, click) {
   return el;
 }
 
+function renderArtistDiscovery() {
+  const tools = byId('artist-discovery');
+  tools.hidden = state.section !== 'artist';
+  document.querySelector('.shell').classList.toggle('gallery-focus', state.galleryFocus);
+  tools.replaceChildren();
+  if (tools.hidden) return;
+  const groups = node('select', 'artist-group');
+  groups.setAttribute('aria-label', '按画师名称开头分类');
+  const addOptions = (container, entries) => {
+    for (const [value, label] of entries) {
+      const option = node('option', '', label);
+      option.value = value;
+      container.append(option);
+    }
+  };
+  addOptions(groups, [['all', '名称分类 · 全部']]);
+  for (const [label, entries] of [
+    ['字母 A–Z', [['letters', '全部字母'], ...Array.from('ABCDEFGHIJKLMNOPQRSTUVWXYZ', key => [`letter-${key}`, key])]],
+    ['数字 0–9', [['digits', '全部数字'], ...Array.from('0123456789', key => [`digit-${key}`, key])]],
+    ['其他文字与符号', [['han', '汉字'], ['kana', '假名'], ['hangul', '韩文'], ['other-letter', '其他文字'], ['symbol', '符号']]],
+  ]) {
+    const group = node('optgroup');
+    group.label = label;
+    addOptions(group, entries);
+    groups.append(group);
+  }
+  groups.value = state.artistGroup;
+  groups.addEventListener('change', () => {
+    state.artistGroup = groups.value;
+    state.artistShuffle = 0;
+    state.limit = pageSize;
+    render();
+  });
+  const toolbar = node('div', 'discovery-controls');
+  toolbar.append(groups, button('换一批', 'soft compact', () => {
+    state.artistShuffle = (Math.random() * 0xffffffff >>> 0) || 1;
+    state.limit = pageSize;
+    render();
+  }), button(state.galleryFocus ? '退出图墙' : '全屏图墙', 'soft compact', () => {
+    state.galleryFocus = !state.galleryFocus;
+    main.scrollTop = 0;
+    render();
+  }));
+  tools.append(toolbar);
+  if (state.galleryFocus || state.artistShuffle || isKorean()) {
+    const controls = node('div', 'discovery-controls');
+    if (state.galleryFocus) {
+      for (const columns of [2, 3, 4]) {
+        controls.append(chip(`${columns} 列`, state.galleryColumns === columns, () => {
+          state.galleryColumns = columns;
+          render();
+        }));
+      }
+    }
+    if (isKorean()) controls.append(chip('按作品数', state.artistOrder === 'posts' && !state.artistShuffle, () => {
+      state.artistOrder = state.artistOrder === 'posts' && !state.artistShuffle ? 'name' : 'posts';
+      state.artistShuffle = 0;
+      state.limit = pageSize;
+      render();
+    }));
+    if (state.artistShuffle) controls.append(button('恢复排序', 'text-button', () => {
+      state.artistShuffle = 0;
+      render();
+    }));
+    tools.append(controls);
+  }
+}
+
+function renderCharacterFilters(target) {
+  const panel = node('details', 'character-filters');
+  panel.open = Object.values(state.characterFilters).some(Boolean);
+  panel.append(node('summary', '', '按作品、服装、性别或类型筛选'));
+  const cards = state.mode === 'personal' ? state.personal : (state.online || []);
+  for (const [key, label] of characterFields) {
+    const values = new Set(cards.filter(card => card.section === 'character').map(card => card[key]).filter(Boolean));
+    const choices = [['', '全部'], [' ', '未标注'], ...[...values].sort((a, b) => a.localeCompare(b, 'zh-CN')).map(value => [value, value])];
+    const select = options(choices, state.characterFilters[key] || '');
+    select.addEventListener('change', () => {
+      state.characterFilters[key] = select.value;
+      state.limit = pageSize;
+      renderList();
+    });
+    panel.append(field(label, select));
+  }
+  target.append(panel);
+}
+
 function render() {
   const current = sections[state.section];
   byId('eyebrow').textContent = 'NOVELAI / 掌上词库';
@@ -310,7 +534,8 @@ function render() {
   byId('personal').setAttribute('aria-pressed', String(state.mode === 'personal'));
   byId('online').setAttribute('aria-pressed', String(state.mode === 'online'));
   byId('online').textContent = state.section === 'knowledge' ? '知识与资源' : '在线资源';
-  query.placeholder = state.section === 'knowledge' ? '搜动作、标题或提示词' : `搜索${current.type}`;
+  query.placeholder = state.section === 'knowledge' ? '搜动作、标题或提示词'
+    : state.section === 'character' ? '搜角色、作品或服装' : `搜索${current.type}`;
   document.querySelectorAll('#nav button').forEach((el) => {
     if (el.dataset.section === state.section) el.setAttribute('aria-current', 'page');
     else el.removeAttribute('aria-current');
@@ -326,11 +551,14 @@ function render() {
     for (const [id, label] of sources) resourceTabs.append(chip(label, state.artistSource === id, () => {
       state.artistSource = id;
       state.model = id === 'imported' ? 'pack' : 'V5';
+      state.artistGroup = 'all';
+      state.artistShuffle = 0;
       if (id === 'imported') selectPack(state.pack?.id || state.packs[0]?.id);
       else if (id === 'korean') ensureKorean();
       else if (state.hasOnline) ensureOnline();
       resetResults();
     }));
+    resourceTabs.append(button('更多图包', 'text-button', showPackSources));
   }
   if (state.section === 'knowledge') {
     if (state.mode === 'online') {
@@ -383,6 +611,21 @@ function render() {
       filters.append(picker);
     }
   }
+  if (isKorean()) {
+    const picker = options([['all', '韩国全部图包'], ...koreanPacks], state.koreanPack);
+    picker.className = 'source-select';
+    picker.setAttribute('aria-label', '选择韩国画师图包');
+    picker.addEventListener('change', () => {
+      state.koreanPack = picker.value;
+      state.korean = null;
+      state.koreanStatus = '';
+      state.limit = pageSize;
+      ensureKorean();
+      render();
+    });
+    filters.append(picker);
+  }
+  if (state.section === 'character') renderCharacterFilters(filters);
   const viewOptions = byId('view-options');
   viewOptions.replaceChildren(node('span', '', '显示'));
   for (const [value, label] of [['grid', '双列看图'], ['list', '图文列表'], ['compact', '紧凑文字']]) {
@@ -392,6 +635,7 @@ function render() {
       render();
     }));
   }
+  renderArtistDiscovery();
   renderList();
 }
 
@@ -433,22 +677,26 @@ function thumbnail(card, grid) {
 }
 
 function row(card) {
-  const view = views[state.section];
+  const view = state.galleryFocus ? 'grid' : views[state.section];
   const grid = view === 'grid';
   const item = node('article', grid ? 'card' : 'row');
   const hit = button(card.title, grid ? 'card-main' : 'row-main', () => showCard(card));
+  hit.setAttribute('aria-label', card.title);
   const mark = node('span', 'row-mark');
   mark.append(icon(sections[card.section].icon));
   const text = node('span', 'row-text');
   const caption = card.section === 'knowledge'
     ? [knowledgeKinds.find(([key]) => key === card.kind)?.[1] || '通用写法', card.prompt || card.source]
-    : [card.model, card.source || (card.photos.length ? '有配图' : '自建')];
+    : [card.work, card.outfit, card.model, card.source || (card.photos.length ? '有配图' : '自建')];
+  if (Number.isSafeInteger(card.postCount)) caption.push(`原库 ${number.format(card.postCount)} 条`);
   text.append(node('span', 'row-title', card.title), node('span', 'row-caption', caption.filter(Boolean).join(' · ')));
   if (card.section === 'knowledge' && card.note && view !== 'compact') text.append(node('span', 'row-note', card.note));
   hit.replaceChildren(view === 'compact' || (view === 'list' && !card.photos.length) ? mark : thumbnail(card, grid), text);
   item.append(hit);
-  if (card.prompt) item.append(button(`复制 ${card.title}`, 'icon-button', () => copy(card.prompt), 'copy'));
-  else item.append(button(`查看 ${card.title}`, 'icon-button', () => showCard(card), 'arrow'));
+  if (!state.galleryFocus) {
+    if (card.prompt) item.append(button(`复制 ${card.title}`, 'icon-button', () => copy(card.prompt), 'copy'));
+    else item.append(button(`查看 ${card.title}`, 'icon-button', () => showCard(card), 'arrow'));
+  }
   return item;
 }
 
@@ -463,12 +711,13 @@ function renderList() {
   const pack = !personal && state.section === 'artist' && state.artistSource === 'imported';
   const remote = isRemote();
   if (korean) {
-    results.append(node('p', 'resource-note', state.koreanStatus || '韩国原版 V5 · bequiet 精选 6,145 位画师，原图按需加载。'));
+    const label = state.koreanPack === 'all' ? '精选、33000-Q 和 55000-Q' : koreanPacks.find(([id]) => id === state.koreanPack)?.[1];
+    results.append(node('p', 'resource-note', state.koreanStatus || `韩国原版 V5 · ${label} · ${state.korean ? `${number.format(state.korean.length)} 位画师 · ` : ''}样图按需加载。`));
     const check = button(state.koreanChecking ? '检查中…' : '检查韩国原库更新', 'text-button', checkKorean);
     check.disabled = state.koreanChecking;
     meta.append(check);
     if (!state.korean) {
-      empty(state.koreanError ? '主库目录读取失败' : '正在打开韩国主库', '无需下载完整原包。', ...(state.koreanError ? [button('重试', 'soft', () => { ensureKorean(); renderList(); })] : []));
+      empty(state.koreanError ? '主库目录读取失败' : '正在打开韩国主库', '可以在上方切换单个图包。', ...(state.koreanError ? [button('重试', 'soft', () => { ensureKorean(); renderList(); })] : []));
       return;
     }
   }
@@ -481,7 +730,7 @@ function renderList() {
     results.append(node('p', 'resource-note', description));
   }
   if (!personal && state.section === 'artist' && window.Pocket) {
-    const importer = button(state.importing ? '导入中…' : '导入已有数据包', 'text-button', importPack);
+    const importer = button(state.importing ? '导入中…' : '导入图包或 ZIP', 'text-button', importPack);
     importer.disabled = state.importing;
     meta.append(importer);
   }
@@ -516,22 +765,38 @@ function renderList() {
   const source = personal ? state.personal : korean ? state.korean : remote ? state.online : knowledge
     ? (state.knowledgeTab === 'references' ? PocketSources.references : PocketSources.knowledge)
     : state.packRows;
-  const terms = query.value.trim().toLocaleLowerCase().replaceAll('_', ' ').split(/[,，]+/).map((s) => s.trim()).filter(Boolean);
+  const terms = searchText(query.value).split(/[,，]+/).map((s) => s.trim()).filter(Boolean);
   const matching = source.filter((card) => {
     if (card.section !== state.section || (remote && card.model !== state.model)) return false;
     if (knowledge && state.kind !== 'all' && card.kind !== state.kind) return false;
+    if (state.section === 'artist' && !matchesArtistGroup(card, state.artistGroup)) return false;
+    if (state.section === 'character' && !characterFields.every(([key]) => {
+      const filter = state.characterFilters[key];
+      return !filter || (filter === ' ' ? !card[key] : card[key] === filter);
+    })) return false;
     if (!terms.length) return true;
-    const words = [card.title, card.prompt, card.note].join(' ').toLocaleLowerCase().replaceAll('_', ' ');
+    const words = searchText([card.title, card.prompt, card.note, card.work, card.outfit, card.gender, card.species].join(' '));
     return terms.every((term) => words.includes(term));
   });
+  if (state.section === 'artist' && state.artistShuffle) shuffleArtists(matching, state.artistShuffle);
+  else if (korean && state.artistOrder === 'posts') matching.sort((a, b) => (b.postCount ?? -1) - (a.postCount ?? -1));
   meta.prepend(node('span', '', `${number.format(matching.length)} 条`));
   if (!matching.length) {
-    if (terms.length) empty('没有匹配的条目', '试试更短的关键词，或切换模型。', button('清除搜索', 'soft', resetResults));
+    if (terms.length || (state.section === 'artist' && state.artistGroup !== 'all') ||
+        (state.section === 'character' && Object.values(state.characterFilters).some(Boolean))) {
+      empty('没有匹配的条目', '换个名称分类，或试试更短的关键词。', button('清除筛选', 'soft', () => {
+        state.artistGroup = 'all';
+        state.artistShuffle = 0;
+        state.characterFilters = {};
+        resetResults();
+      }));
+    }
     else if (personal) empty('从一条常用词开始', '保存后随时搜索、编辑或复制。', button('新增条目', 'soft', () => showEditor()), button('看看在线资源', 'subtle', () => chooseMode('online')));
     else empty('这里还没有条目', knowledge && remote ? '在线图鉴目前只有发型和表情；V5 暂无表情图库。可切换模型或进入中文知识查看其他分类。' : '可以切换分类，或重新导入已有数据包。');
     return;
   }
-  const list = node('div', views[state.section] === 'grid' ? 'gallery' : 'list');
+  const list = node('div', state.galleryFocus ? `gallery gallery-${state.galleryColumns} dense-gallery`
+    : views[state.section] === 'grid' ? 'gallery' : 'list');
   list.append(...matching.slice(0, state.limit).map(row));
   results.append(list);
   if (matching.length > state.limit) {
@@ -551,7 +816,12 @@ function renderList() {
   }
 }
 
-function openScreen(title) {
+let screenBack = null;
+let screenRevision = 0;
+
+function openScreen(title, back = null) {
+  screenRevision++;
+  screenBack = back;
   byId('screen-title').textContent = title;
   body.replaceChildren();
   actions.replaceChildren();
@@ -560,9 +830,31 @@ function openScreen(title) {
 }
 
 function closeScreen() {
+  screenRevision++;
+  screenBack = null;
   screen.close();
   body.replaceChildren();
   actions.replaceChildren();
+}
+
+function goBack() {
+  if (screenBack) screenBack();
+  else closeScreen();
+}
+
+function appendCopyFact(list, label, value, missing, includeEmpty = false) {
+  const exists = includeEmpty ? value !== undefined : value != null && value !== '';
+  if (!exists && !missing) return;
+  const copyValue = value === '' && includeEmpty ? '""' : value;
+  const text = exists ? (typeof copyValue === 'string' ? copyValue : JSON.stringify(copyValue)) : missing;
+  const detail = node('dd', 'copy-fact');
+  detail.append(node('span', exists ? '' : 'muted', text));
+  if (exists) {
+    const control = button('复制', 'text-button copy-fact-button', () => copy(copyValue));
+    control.setAttribute('aria-label', '复制' + label);
+    detail.append(control);
+  }
+  list.append(node('dt', '', label), detail);
 }
 
 function showPhotos(card) {
@@ -607,12 +899,30 @@ function showCard(card) {
     badges.append(node('span', 'badge', value));
   }
   body.append(badges);
+  if (card.section === 'character') {
+    const facts = node('dl', 'metadata-facts');
+    const fields = [['title', '名称'], ...characterFields, ['model', '模型'], ['source', '来源']];
+    for (const [key, label] of fields) appendCopyFact(facts, label, card[key], '未标注');
+    const profile = [...fields, ['prompt', '提示词'], ['note', '备注'], ['sourceUrl', '来源链接']]
+      .filter(([key]) => card[key]).map(([key, label]) => `${label}：${card[key]}`).join('\n');
+    body.append(facts);
+    body.append(button('复制角色资料', 'soft compact', () => copy(profile)));
+  }
+  if (Number.isSafeInteger(card.postCount)) body.append(node('p', 'resource-note', `原库作品记录 ${number.format(card.postCount)} 条 · bequiet 的统计`));
   showPhotos(card);
   if (card.prompt) body.append(node('div', 'prompt', card.prompt));
-  if (card.note) body.append(node('p', 'detail-note', card.note));
+  if (card.note) {
+    body.append(node('p', 'detail-note', card.note));
+    if (card.section === 'character') body.append(button('复制备注', 'text-button', () => copy(card.note)));
+  }
   if (card.generation) {
     const details = node('details', 'metadata-details');
     details.append(node('summary', '', '原图完整生成信息'), node('pre', 'prompt', card.generation), button('复制完整信息', 'soft', () => copy(card.generation)));
+    let generation;
+    try { generation = JSON.parse(card.generation); } catch { /* Keep legacy notes readable. */ }
+    if (Array.isArray(generation?.characters) || Array.isArray(generation?.negativeCharacters)) {
+      renderCharacterPrompts(details, generation.characters, generation.negativeCharacters);
+    }
     body.append(details);
   }
   if (card.sourceUrl) {
@@ -620,8 +930,11 @@ function showCard(card) {
     credit.append(button('查看来源', 'text-button', () => openLink(card.sourceUrl)));
     body.append(credit);
   }
-  if (card.prompt) actions.append(button('复制提示词', 'primary', () => copy(card.prompt)));
-  if (card.local) actions.append(button('编辑', 'soft', () => showEditor(card)));
+  if (card.prompt) actions.append(button(card.section === 'character' ? '复制此角色提示词' : '复制提示词', 'primary', () => copy(card.prompt)));
+  if (card.local) {
+    actions.append(button('编辑', 'soft', () => showEditor(card)));
+    if (card.section === 'character') actions.append(button('另存服装', 'soft', () => showEditor({ ...card, id: card.from || card.id, local: false, outfit: '' })));
+  }
   else actions.append(button('加入我的', card.prompt ? 'soft' : 'primary', () => {
     const existing = state.personal.find((saved) => saved.from === card.id || (card.section !== 'knowledge' && cardIdentity(saved) === cardIdentity(card)));
     if (existing) {
@@ -634,7 +947,9 @@ function showCard(card) {
 }
 
 function cardIdentity(card) {
-  return [card.section, card.model || '通用', (card.prompt || '').trim().normalize('NFC').toLowerCase().replace(/^artist:\s*/, '').replaceAll('_', ' ').replace(/\s+/g, ' ')].join('|');
+  const key = [card.section, card.model || '通用', searchText(card.prompt).replace(/^artist:\s*/, '')];
+  if (card.section === 'character') key.push(searchText(card.outfit));
+  return JSON.stringify(key);
 }
 
 function field(label, input) {
@@ -713,6 +1028,16 @@ function showEditor(previous) {
   attachments.append(photoStatus, photoButton, remove);
   form.append(field('名称', title), field(sections[section].type, prompt));
   if (section === 'knowledge') form.append(field('知识分类', kind));
+  const characterInputs = {};
+  if (section === 'character') {
+    for (const [key, label] of characterFields) {
+      const current = previous?.[key] || '';
+      const input = key === 'gender' ? options(genderChoices, current) : key === 'species' ? options(speciesChoices, current)
+        : textInput('input', current, key === 'work' ? '填写原作名称（选填）' : '例如校服、冬装（选填）', 120);
+      characterInputs[key] = input;
+      form.append(field(label, input));
+    }
+  }
   form.append(field('适用模型', model));
   form.append(field('备注（选填）', note), attachments);
   body.append(form);
@@ -735,6 +1060,7 @@ function showEditor(previous) {
       photos, source: previous?.source, sourceUrl: previous?.sourceUrl,
       license: previous?.license, local: true, updated: Date.now(),
       generation: previous?.generation,
+      ...Object.fromEntries(Object.entries(characterInputs).map(([key, input]) => [key, input.value.trim()])),
     };
     const duplicate = section !== 'knowledge' && state.personal.find((saved) => saved.id !== card.id && cardIdentity(saved) === cardIdentity(card));
     if (duplicate) { save.disabled = false; toast('该模型下已有相同标签，请编辑已有条目。'); return; }
@@ -744,6 +1070,8 @@ function showEditor(previous) {
       state.section = section;
       state.mode = 'personal';
       state.kind = 'all';
+      state.galleryFocus = false;
+      state.characterFilters = {};
       resetResults();
       await loadPersonal();
       toast('已保存到我的词库');
@@ -803,13 +1131,14 @@ function validateBackup(raw) {
     /^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/=\r\n]+$/.test(url)
     || /^\/nax-image\/[a-z0-9.-]+\/[^/?#]+(?:\?rev=[^#]*)?$/.test(url)
     || /^\/pack-image\/[a-zA-Z0-9-]+\/\d+\/\d+$/.test(url)
-    || /^\/korean-image\/\d+\/\d+$/.test(url));
+    || /^\/korean-image\/(?:(?:33000|55000)\/)?\d+\/\d+$/.test(url));
   const text = (value, max, optional = true) => (optional && value === undefined) || (typeof value === 'string' && value.length <= max);
   return data.cards.map((card) => {
     if (!card || typeof card !== 'object' || !text(card.id, 500, false) || !card.id || ids.has(card.id)
       || !Object.hasOwn(sections, card.section) || !text(card.title, 400, false)
       || !text(card.prompt, 16000) || !text(card.note, 8000) || !text(card.model, 40)
       || !text(card.source, 500) || !text(card.sourceUrl, 2000) || !text(card.from, 1000) || !text(card.license, 100)
+      || !text(card.work, 120) || !text(card.outfit, 120) || !text(card.gender, 30) || !text(card.species, 30)
       || !text(card.generation, 2 * 1024 * 1024) || (card.generation && new Blob([card.generation]).size > 2 * 1024 * 1024)
       || !Array.isArray(card.photos) || card.photos.length > 64
       || card.photos.some((photo) => !photo || !safePhoto(photo.url) || !text(photo.label, 200))) {
@@ -826,6 +1155,7 @@ function validateBackup(raw) {
       photos: card.photos.map(({url, label}) => ({url, label})), source: card.source, sourceUrl: card.sourceUrl,
       license: card.license, local: true, updated: Number.isFinite(card.updated) ? card.updated : Date.now(),
       generation: card.generation,
+      work: card.work, outfit: card.outfit, gender: card.gender, species: card.species,
     };
   });
 }
@@ -888,69 +1218,246 @@ async function importBackup() {
 
 async function readImagePrompts() {
   if (!window.Pocket) { toast('请在安卓 App 中选择原图。'); return; }
+  const revision = screenRevision;
   try {
     const data = await native('readImagePrompts');
-    if (!data) return;
-    openScreen('原图提示词');
-    if (!data.found) {
-      body.append(node('h2', '', '没有读到提示词'), node('p', 'detail-note', data.message || '图片可能没有保留生成信息。请使用生成时下载的原始 PNG，截图和压缩后的图片通常无法读取。'));
-      actions.append(button('重新选图', 'primary', readImagePrompts));
-      return;
-    }
-    body.append(node('p', 'resource-note', '只读取图片文件中已有的信息，不会上传图片，也不会猜测被清除的提示词。'));
-    const addPrompt = (label, value) => {
-      if (!value) return;
-      const section = toolSection(label, '');
-      section.append(node('div', 'prompt', value), button('复制' + label, 'soft', () => copy(value)));
-    };
-    addPrompt('正向提示词', data.prompt);
-    addPrompt('负向提示词', data.negativePrompt);
-    if (data.model) body.append(node('p', 'detail-note', '模型 / 来源：' + data.model));
-    if (data.characters) {
-      const chars = typeof data.characters === 'string' ? data.characters : JSON.stringify(data.characters, null, 2);
-      if (chars !== '[]' && chars !== '{}') addPrompt('角色与位置', chars);
-    }
-    if (data.negativeCharacters) {
-      const chars = typeof data.negativeCharacters === 'string' ? data.negativeCharacters : JSON.stringify(data.negativeCharacters, null, 2);
-      if (chars !== '[]' && chars !== '{}') addPrompt('角色负向提示', chars);
-    }
-    if (data.rawComment) {
-      const details = node('details', 'metadata-details');
-      details.append(node('summary', '', '查看完整生成参数'), node('pre', 'prompt', data.rawComment), button('复制完整参数', 'soft', () => copy(data.rawComment)));
-      body.append(details);
-    }
-    actions.append(button('另选原图', 'soft', readImagePrompts));
-    if (data.prompt && data.prompt.length <= 16000) actions.append(button('收藏提示词', 'primary', () => {
-      const generation = JSON.stringify({ prompt: data.prompt, negativePrompt: data.negativePrompt, model: data.model,
-        parameters: data.parameters, characters: data.characters, negativeCharacters: data.negativeCharacters,
-        v4Prompt: data.v4Prompt, v4NegativePrompt: data.v4NegativePrompt, rawComment: data.parameters ? undefined : data.rawComment }, null, 2);
-      if (new Blob([generation]).size > 2 * 1024 * 1024) { toast('完整参数超过收藏上限，请保留原图文件。'); return; }
-      const note = data.negativePrompt && data.negativePrompt.length <= 7900 ? '负向提示词：\n' + data.negativePrompt : '完整正负提示词、角色信息和参数已保存在本条目的生成信息中。';
-      showEditor({ section: 'knowledge', kind: 'general', title: '原图提示词', prompt: data.prompt,
-        note, photos: [], generation });
-    }));
-    else if (data.prompt) body.append(node('p', 'resource-note', '正向提示词超过编辑器上限，本次可查看和复制，请保留原始图片。'));
+    if (!data || revision !== screenRevision) return;
+    showPromptImport(data);
   } catch (error) { toast(error.message || '读取原图失败。'); }
 }
 
-function showTools() {
+function checkOption(label, checked, change) {
+  const wrapper = node('label', 'option-check');
+  const input = node('input');
+  input.type = 'checkbox';
+  input.checked = checked;
+  input.addEventListener('change', () => change(input.checked));
+  wrapper.append(input, node('span', '', label));
+  return wrapper;
+}
+
+function selectedGeneration(data, selected) {
+  const actual = selected.actual;
+  const prompt = selected.positive ? (actual && data.actualPrompt || data.prompt || '') : '';
+  const negativePrompt = selected.negative ? (actual && data.actualNegativePrompt || data.negativePrompt || '') : '';
+  const characters = selected.characters ? (actual && data.actualCharacters?.length ? data.actualCharacters : data.characters || []) : [];
+  const negativeCharacters = selected.characters ? (actual && data.actualNegativeCharacters?.length ? data.actualNegativeCharacters : data.negativeCharacters || []) : [];
+  const parameters = selected.settings ? { ...data.parameters } : {};
+  for (const key of ['prompt', 'uc', 'negative_prompt', 'v4_prompt', 'v4_negative_prompt', 'actual_prompts', 'Comment', 'seed']) delete parameters[key];
+  if (selected.seed && data.parameters?.seed !== undefined) parameters.seed = data.parameters.seed;
+  const withCaptions = (original, base, rows) => original && selected.characters
+    ? { ...original, caption: { base_caption: base, char_captions: rows } } : undefined;
+  return {
+    prompt, negativePrompt, characters, negativeCharacters, parameters,
+    model: selected.settings ? data.model : undefined,
+    promptMode: actual ? 'actual' : 'original',
+    v4Prompt: withCaptions(data.v4Prompt, prompt, characters),
+    v4NegativePrompt: withCaptions(data.v4NegativePrompt, negativePrompt, negativeCharacters),
+  };
+}
+
+const parameterLabels = {
+  model: '模型', sampler: '采样器', steps: '步数', seed: '种子',
+  width: '宽度', height: '高度', scale: '提示词引导（CFG）', cfg_rescale: '引导重缩放',
+  noise_schedule: '噪声计划', sm: 'SMEA', sm_dyn: 'SMEA DYN',
+  qualityToggle: '质量词开关', ucPreset: '负向预设',
+  dynamic_thresholding: '动态阈值', strength: '强度', noise: '噪声',
+};
+
+function renderCharacterPrompts(container, characters, negatives) {
+  if (!Array.isArray(characters)) characters = [];
+  if (!Array.isArray(negatives)) negatives = [];
+  const caption = (entry) => typeof entry === 'string' ? entry : entry?.char_caption || '';
+  for (let i = 0; i < Math.max(characters.length, negatives.length); i++) {
+    const title = `角色 ${i + 1}`;
+    const positive = characters[i];
+    const negative = negatives[i];
+    const group = node('section', 'tool-section character-prompts');
+    const fields = { prompt: caption(positive), negativePrompt: caption(negative) };
+    if (positive?.centers?.length) fields.centers = positive.centers;
+    if (negative?.centers?.length) fields.negativeCenters = negative.centers;
+    group.append(node('h2', '', title),
+      button('复制这位角色', 'soft compact', () => copy(fields)));
+    addCopyablePrompt(group, title + '正向', fields.prompt);
+    addCopyablePrompt(group, title + '负向', fields.negativePrompt);
+    const positions = node('dl', 'metadata-facts');
+    appendCopyFact(positions, '正向位置', fields.centers);
+    appendCopyFact(positions, '负向位置', fields.negativeCenters);
+    if (positions.childElementCount) group.append(positions);
+    container.append(group);
+  }
+}
+
+function addCopyablePrompt(container, label, value) {
+  if (!value) return;
+  const section = node('div', 'copyable-prompt');
+  const control = button('复制' + label, 'soft compact', () => copy(value));
+  section.append(node('h3', '', label), node('div', 'prompt', value), control);
+  container.append(section);
+}
+
+function showPromptImport(data, { back = null, galleryItem = null } = {}) {
+  openScreen('原图提示词与参数', back);
+  const revision = screenRevision;
+  const libraryButton = button('存原图到图库', 'soft compact', async () => {
+    libraryButton.disabled = true;
+    try {
+      const saved = await native('saveLastOriginal');
+      if (revision !== screenRevision) return;
+      if (!saved?.id) throw new Error('无法保存原图。');
+      libraryButton.replaceWith(button('打开原图图库', 'soft compact', showGallery));
+      toast(saved.added ? '原图已保存到图库' : '原图已在图库');
+    } catch (error) {
+      if (revision !== screenRevision) return;
+      libraryButton.disabled = false;
+      toast(error.message);
+    }
+  });
+  if (!galleryItem) body.append(libraryButton);
+  if (data.preview && /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(data.preview)) {
+    const preview = node('img', 'original-preview');
+    preview.src = data.preview;
+    preview.alt = '所选原图预览';
+    body.append(preview);
+  }
+  const availablePrompt = data.found || data.actualPrompt || data.actualNegativePrompt
+    || data.actualCharacters?.length || data.actualNegativeCharacters?.length;
+  if (!availablePrompt) body.append(node('p', 'detail-note', data.message || '未读到提示词。截图和转存可能清除生成信息。'));
+  body.append(node('p', 'resource-note', `${data.metadataType || '图片元数据'} · 可逐项复制，勾选控制「复制所选」。`));
+  const selection = node('div', 'prompt-selection');
+  const content = node('div');
+  const selected = {};
+  const groups = [
+    ['positive', '正向提示词', Boolean(data.prompt || data.actualPrompt)],
+    ['negative', '负向提示词', Boolean(data.negativePrompt || data.actualNegativePrompt)],
+    ['characters', '角色提示词和位置', Boolean(data.characters?.length || data.negativeCharacters?.length || data.actualCharacters?.length || data.actualNegativeCharacters?.length)],
+    ['settings', '模型与生成设置', Boolean(data.parameters || data.model)],
+    ['seed', '种子', data.parameters?.seed !== undefined],
+  ];
+  for (const [key, label, available] of groups) {
+    selected[key] = available;
+    if (available) selection.append(checkOption(label, true, (checked) => { selected[key] = checked; renderFields(); }));
+  }
+  if (data.actualPrompt || data.actualNegativePrompt || data.actualCharacters?.length || data.actualNegativeCharacters?.length) {
+    selection.append(checkOption('使用随机展开后的实际提示词', false, (checked) => { selected.actual = checked; renderFields(); }));
+  }
+  if (selection.childElementCount) body.append(selection);
+  body.append(content);
+  const rawFields = Object.entries(data.metadata || {});
+  if (rawFields.length || data.rawComment) {
+    const details = node('details', 'metadata-details');
+    details.append(node('summary', '', '原始元数据'),
+      button('复制全部原始元数据', 'soft compact', () => copy(rawFields.length ? data.metadata : data.rawComment)));
+    const raw = node('dl', 'metadata-facts');
+    for (const [key, value] of rawFields) appendCopyFact(raw, key, value, '空值', true);
+    if (raw.childElementCount) details.append(raw);
+    body.append(details);
+  }
+
+  function renderFields() {
+    const generation = selectedGeneration(data, selected);
+    content.replaceChildren();
+    addCopyablePrompt(content, '正向提示词', generation.prompt);
+    addCopyablePrompt(content, '负向提示词', generation.negativePrompt);
+    renderCharacterPrompts(content, generation.characters, generation.negativeCharacters);
+    const params = selectedGeneration(data, { settings: true, seed: true }).parameters;
+    if (data.model && params.model == null) params.model = data.model;
+    const settings = node('section', 'tool-section');
+    settings.append(node('h2', '', '生成参数'));
+    const facts = node('dl', 'metadata-facts');
+    for (const key of new Set(['sampler', 'steps', ...Object.keys(parameterLabels), ...Object.keys(params)])) {
+      appendCopyFact(facts, Object.prototype.hasOwnProperty.call(parameterLabels, key) ? parameterLabels[key] : key,
+        Object.prototype.hasOwnProperty.call(params, key) ? params[key] : undefined,
+        ['sampler', 'steps'].includes(key) ? '原图未记录' : undefined, true);
+    }
+    settings.append(facts);
+    if (Object.keys(params).length) settings.append(button('复制全部生成参数', 'soft compact', () => copy(params)));
+    content.append(settings);
+    const json = JSON.stringify(generation, null, 2);
+    const chosen = groups.some(([key]) => selected[key]);
+    actions.replaceChildren(button(galleryItem ? '返回原图' : '另选原图', 'soft', back || readImagePrompts));
+    const copySelection = button('复制所选', 'soft', () => copy(json));
+    const save = button('收藏所选', 'primary', () => {
+      if (new Blob([json]).size > 2 * 1024 * 1024 || generation.prompt.length > 16000) { toast('所选信息超过收藏上限，请保留原图。'); return; }
+      const note = generation.negativePrompt && generation.negativePrompt.length < 7900
+        ? '负向提示词：\n' + generation.negativePrompt : '已附带所选生成信息。';
+      showEditor({ section: 'knowledge', kind: 'general', title: '原图生成信息', prompt: generation.prompt,
+        note, photos: [], generation: json });
+    });
+    copySelection.disabled = save.disabled = !chosen;
+    actions.append(copySelection, save);
+  }
+  renderFields();
+}
+
+let updateOffer = null;
+let checkingAutomaticUpdate = false;
+
+function rememberUpdate(info) {
+  if (info?.available) updateOffer = info;
+  else if (info?.status === 'current') updateOffer = null;
+  const notice = byId('update-notice');
+  notice.hidden = !updateOffer;
+  notice.replaceChildren();
+  if (updateOffer) {
+    const label = updateOffer.downloaded ? '新版已准备好' : '发现新版';
+    notice.append(node('span', '', `${label} ${updateOffer.latestVersion || ''}`),
+      button(updateOffer.downloaded ? '安装更新' : '查看更新', 'soft compact', () => showTools(updateOffer)));
+  }
+}
+
+async function checkAutomaticUpdate() {
+  if (!window.Pocket || checkingAutomaticUpdate) return;
+  checkingAutomaticUpdate = true;
+  try { rememberUpdate(await native('checkAutomaticUpdate')); }
+  catch { /* Manual checking remains available when automatic checking fails. */ }
+  finally { checkingAutomaticUpdate = false; }
+}
+
+function showTools(initialUpdate) {
   openScreen('设置与工具');
-  const image = toolSection('读取原图提示词', '选择原始 PNG，读取保留在图片中的正向、负向提示词和生成参数。全程在本机处理。');
+  const image = toolSection('导入原图生成信息', '选择 NovelAI 保存的 PNG 或 WebP 原图，逐项复制提示词和生成参数。也可把原图保存到本机图库。');
   image.append(button('选择原图', 'primary', readImagePrompts));
-  const backup = toolSection('个人词库备份', '导出收藏、自己写的条目和自选配图，换机时可以恢复。在线图片和导入的数据包只保留引用，不会打包进去。');
+  const backup = toolSection('个人词库备份', '备份收藏、自己写的条目和自选配图。图库原图请单独保留，换机后可重新导入。');
   const backupActions = node('div', 'tool-actions');
   backupActions.append(button('导出备份', 'soft', exportBackup), button('从备份恢复', 'soft', importBackup));
   backup.append(backupActions);
-  const update = toolSection('应用版本更新', '通过 GitHub 发布页检查新版。发现新版后在浏览器下载 APK，再由安卓确认安装。');
+  const update = toolSection('应用版本更新', '打开 App 时自动检查并下载新版。下载后校验长度、签名和版本，由你在安卓系统中确认安装。');
   const version = node('p', 'detail-note', '正在读取版本…');
   const repo = textInput('input', '', 'owner/repo 或 GitHub 仓库链接', 300);
   const result = node('div', 'update-result');
   result.setAttribute('aria-live', 'polite');
   const controls = node('div', 'tool-actions');
+  const displayUpdate = (info) => {
+    rememberUpdate(info);
+    result.replaceChildren(node('p', '', info.downloadError || info.message));
+    if (info.body) result.append(node('p', 'release-notes', info.body));
+    if (info.downloaded) {
+      result.append(button('安装已校验的更新', 'primary', async () => {
+        try {
+          if (await native('installAppUpdate') === 'permission') {
+            result.prepend(node('p', '', '首次需要在系统页允许本 App 安装更新。返回后再点一次安装。'));
+          }
+        } catch (error) { toast(error.message); }
+      }));
+    } else if (info.available && info.downloadUrl) {
+      const download = button('在 App 内下载新版', 'primary', async () => {
+        download.disabled = true;
+        result.prepend(node('p', '', '正在下载并校验安装包…'));
+        try { displayUpdate(await native('downloadAppUpdate')); }
+        catch (error) { result.replaceChildren(node('p', '', error.message)); }
+        finally { download.disabled = false; }
+      });
+      result.append(download);
+    }
+    if (info.releaseUrl) result.append(button('查看发布页', 'text-button', () => native('openAppRelease', 'release').catch((error) => toast(error.message))));
+  };
   const saveRepo = button('保存地址', 'soft', async () => {
     try {
       const info = await native('setUpdateRepository', repo.value.trim());
       repo.value = info.repository;
+      updateOffer = null;
+      rememberUpdate(null);
       result.replaceChildren(node('p', '', info.repository ? '仓库地址已保存，可以检查新版。' : '尚未配置发布仓库。'));
     } catch (error) { toast(error.message); }
   });
@@ -958,13 +1465,7 @@ function showTools() {
     check.disabled = true;
     result.replaceChildren(node('p', '', '正在检查 GitHub 发布版本…'));
     try {
-      const info = await native('checkAppUpdate');
-      result.replaceChildren(node('p', '', info.message));
-      if (info.available && info.downloadUrl) {
-        if (info.body) result.append(node('p', 'release-notes', info.body));
-        result.append(button('下载新版 APK', 'primary', () => native('openAppRelease', 'download').catch((error) => toast(error.message))));
-      }
-      if (info.releaseUrl) result.append(button('查看发布页', 'text-button', () => native('openAppRelease', 'release').catch((error) => toast(error.message))));
+      displayUpdate(await native('checkAppUpdate'));
     } catch (error) { result.replaceChildren(node('p', '', error.message)); }
     finally { check.disabled = false; }
   });
@@ -973,6 +1474,13 @@ function showTools() {
   if (window.Pocket) native('appInfo').then((info) => {
     version.textContent = '当前版本 ' + info.versionName;
     repo.value = info.repository || '';
+    const automatic = checkOption('每天自动检查并下载更新', info.autoUpdate, async (enabled) => {
+      try {
+        await native('setAutoUpdate', String(enabled));
+        if (enabled) checkAutomaticUpdate();
+      } catch (error) { toast(error.message); }
+    });
+    version.after(automatic);
     if (!info.repository) result.append(node('p', '', '发布仓库尚未配置，当前无法检查新版。'));
   }).catch((error) => { version.textContent = error.message; });
   else {
@@ -982,11 +1490,16 @@ function showTools() {
   const thanks = toolSection('来源与感谢', '感谢韩国 Arca Live 社区作者 bequiet / baqu2213 分享原版画师库和查看器；感谢 Carlyone 的 NAX 图库，以及韩国社区和 NovelAI 官方资料。');
   thanks.append(button('原版画师资源', 'text-button', () => openLink('https://arca.live/b/aiart/185691299')),
     button('NAX · CC BY 4.0', 'text-button', () => openLink(PocketSources.nax)));
+  if (initialUpdate?.available || updateOffer?.available) {
+    displayUpdate(initialUpdate?.available ? initialUpdate : updateOffer);
+    if (initialUpdate?.available) update.scrollIntoView({ block: 'start' });
+  }
 }
 
 byId('tools').addEventListener('click', showTools);
+byId('gallery').addEventListener('click', () => showGallery());
 byId('add').addEventListener('click', () => showEditor());
-byId('close').addEventListener('click', closeScreen);
+byId('close').addEventListener('click', goBack);
 byId('personal').addEventListener('click', () => chooseMode('personal'));
 byId('online').addEventListener('click', () => chooseMode('online'));
 byId('nav').addEventListener('click', (event) => {
@@ -999,15 +1512,18 @@ query.addEventListener('input', () => {
   clearTimeout(queryTimer);
   queryTimer = setTimeout(renderList, 80);
 });
-screen.addEventListener('cancel', (event) => { event.preventDefault(); closeScreen(); });
+screen.addEventListener('cancel', (event) => { event.preventDefault(); goBack(); });
 window.PocketBack = () => {
-  if (screen.open) { closeScreen(); return true; }
+  if (screen.open) { goBack(); return true; }
+  if (state.galleryFocus) { state.galleryFocus = false; render(); return true; }
   if (state.mode === 'online') { chooseMode('personal'); return true; }
   return false;
 };
+window.PocketForeground = checkAutomaticUpdate;
 
 ensureKorean();
 render();
 loadPersonal();
 loadPacks();
 checkForSavedDirectory();
+checkAutomaticUpdate();

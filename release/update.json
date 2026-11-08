@@ -1,0 +1,8 @@
+{
+  "versionCode": 4,
+  "versionName": "1.3",
+  "file": "NAI-Pocket-Library.apk",
+  "bytes": 1041454,
+  "sha256": "a191fa4861c5e5ee7c14a16de95294a0ace94d7e2564a2df393de0baad2be95e",
+  "notes": "新增本机原图图库、每项生成参数复制与按角色分组复制，改善应用更新提示。"
+}

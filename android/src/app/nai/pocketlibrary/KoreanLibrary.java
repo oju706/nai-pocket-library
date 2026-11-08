@@ -30,31 +30,40 @@ import java.util.regex.Pattern;
 
 /** A bundled offset index over the author's original JSON. The large JSON is never downloaded. */
 final class KoreanLibrary {
-    private static final String SOURCE_URL = "https://huggingface.co/baqu2213/PoemForSmallFThings/resolve/main/NAIA/NAID5_artist_thumbnail/NAID5-33000-55000-Curated";
-    private static final String PINNED_URL = "https://huggingface.co/baqu2213/PoemForSmallFThings/resolve/3f9a156edc9cee75f579bd25a22ee98ab47dec52/NAIA/NAID5_artist_thumbnail/NAID5-33000-55000-Curated";
+    private static final String SOURCE_ROOT = "https://huggingface.co/baqu2213/PoemForSmallFThings/resolve/";
+    private static final String RELEASE_REVISION = "3f9a156edc9cee75f579bd25a22ee98ab47dec52";
     private static final int MAX_IMAGE = 6 * 1024 * 1024;
     private static final long CACHE_BUDGET = 64L * 1024 * 1024;
     private static final Pattern RANGE = Pattern.compile("bytes ([0-9]+)-([0-9]+)/([0-9]+)");
     private static final String CHANGED = "韩国主库的原文件已变化。旧图片位置已停用，请更新索引或应用后再试。";
     private final Context context;
+    private final String pack;
     private final File previews;
     private final SharedPreferences preferences;
-    private final Semaphore downloads = new Semaphore(3);
+    private static final Semaphore DOWNLOADS = new Semaphore(3);
     private Configuration configuration;
     private volatile boolean changed;
     private volatile State state = new State("failed", "尚未联网核对韩国主库，可点击检查资源更新。", false);
 
     KoreanLibrary(Context context) {
+        this(context, "curated");
+    }
+
+    KoreanLibrary(Context context, String pack) {
         this.context = context.getApplicationContext();
-        previews = new File(context.getCacheDir(), "korean-previews-v1");
-        preferences = context.getSharedPreferences("korean-source", Context.MODE_PRIVATE);
+        this.pack = pack;
+        previews = new File(context.getCacheDir(), "curated".equals(pack) ? "korean-previews-v1" : "korean-previews-" + pack);
+        preferences = context.getSharedPreferences("curated".equals(pack) ? "korean-source" : "korean-source-" + pack, Context.MODE_PRIVATE);
     }
 
     private synchronized Configuration configuration() throws IOException {
         if (configuration != null) return configuration;
-        try (InputStream input = context.getAssets().open("korean-index.json")) {
+        String asset = "curated".equals(pack) ? "korean-index.json" : "korean-" + pack + "-index.json";
+        try (InputStream input = context.getAssets().open(asset)) {
             byte[] bytes = NaxLibrary.readBounded(input, 4 * 1024 * 1024);
-            configuration = parseConfiguration(bytes);
+            Configuration parsed = parseConfiguration(bytes);
+            if (!matchesSource(parsed.url, pack)) throw new IOException("画师目录与图包不匹配。");
+            configuration = parsed;
             changed = configuration.identity.equals(preferences.getString("invalidSource", ""));
             if (changed) state = new State("changed", CHANGED, true);
             return configuration;
@@ -76,7 +85,8 @@ final class KoreanLibrary {
         String url = source.getString("url");
         long length = source.getLong("bytes");
         String etag = source.getString("etag");
-        if ((!SOURCE_URL.equals(url) && !PINNED_URL.equals(url)) || length <= 0 || !etag.matches("\"[a-fA-F0-9]{64}\"")) {
+        if ((!matchesSource(url, "curated") && !matchesSource(url, "33000") && !matchesSource(url, "55000"))
+                || length <= 0 || !etag.matches("\"[a-fA-F0-9]{64}\"")) {
             throw new IOException("Invalid Korean source identity");
         }
         Map<Long, Integer> positions = new HashMap<>();
@@ -101,6 +111,18 @@ final class KoreanLibrary {
         return new Configuration(bytes, url, length, etag, positions);
     }
 
+    private static boolean matchesSource(String url, String pack) {
+        String filename;
+        switch (pack) {
+            case "curated": filename = "NAID5-33000-55000-Curated"; break;
+            case "33000": filename = "NAID5F-33000-Q"; break;
+            case "55000": filename = "NAID5F-55000-Q"; break;
+            default: return false;
+        }
+        String path = "/NAIA/NAID5_artist_thumbnail/" + filename;
+        return url.equals(SOURCE_ROOT + "main" + path) || url.equals(SOURCE_ROOT + RELEASE_REVISION + path);
+    }
+
     static boolean validSpan(long offset, int size, long total) {
         return offset > 0 && size > 0 && size <= MAX_IMAGE && offset <= total - size;
     }
@@ -118,7 +140,7 @@ final class KoreanLibrary {
             return new Preview(bytes);
         }
         try {
-            downloads.acquire();
+            DOWNLOADS.acquire();
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             throw new IOException("读取已取消。", interrupted);
@@ -138,7 +160,7 @@ final class KoreanLibrary {
             if (changed) throw new IOException(CHANGED);
             return new Preview(bytes);
         } finally {
-            downloads.release();
+            DOWNLOADS.release();
         }
     }
 

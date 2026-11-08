@@ -16,6 +16,7 @@ import org.json.JSONException;
 import org.json.JSONObject;
 import org.json.JSONTokener;
 
+import java.io.BufferedInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
 import java.io.File;
@@ -23,12 +24,19 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStreamWriter;
+import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
 import java.util.function.IntConsumer;
 
 final class LocalPacks {
     private static final int MAX_IMAGE = 12 * 1024 * 1024;
+    private static final long MAX_ZIP_STORAGE = 1024L * 1024 * 1024;
+    private static final long STORAGE_RESERVE = 16L * 1024 * 1024;
+    private static final Object ZIP_IMPORT_LOCK = new Object();
     private final File indexes;
     private final SharedPreferences metadata;
     private final ContentResolver resolver;
@@ -45,7 +53,8 @@ final class LocalPacks {
             if (!validId(id) || !file(id).isFile()) continue;
             try {
                 JSONObject stored = new JSONObject(metadata.getString(id, ""));
-                packs.put(new JSONObject().put("id", id).put("name", stored.getString("name")));
+                packs.put(new JSONObject().put("id", id).put("name", stored.getString("name"))
+                        .put("format", stored.optString("format", "original")));
             } catch (JSONException ignored) {
                 // Ignore incomplete pack metadata.
             }
@@ -62,25 +71,137 @@ final class LocalPacks {
         if (descriptor == null) throw new IOException("无法打开所选文件。");
         long size = descriptor.getStatSize();
         try (ParcelFileDescriptor.AutoCloseInputStream input = new ParcelFileDescriptor.AutoCloseInputStream(descriptor)) {
+            boolean seekable = true;
             try {
                 input.getChannel().position(0);
             } catch (IOException failure) {
-                throw new IOException("请把数据包存到手机的下载目录，再从那里选择。", failure);
+                seekable = false;
             }
+            BufferedInputStream buffered = new BufferedInputStream(input);
+            if (name.toLowerCase(Locale.ROOT).endsWith(".zip") || hasZipHeader(buffered)) {
+                return importZip(buffered, size, name, progress, null);
+            }
+            if (!seekable) throw new IOException("请把数据包存到手机的下载目录，再从那里选择。");
             FileOutputStream output = target.startWrite();
             try {
                 JsonWriter writer = new JsonWriter(new OutputStreamWriter(output, StandardCharsets.UTF_8));
-                scan(input, size, writer, progress);
+                scan(buffered, size, writer, progress);
                 writer.flush();
                 target.finishWrite(output);
             } catch (Exception failure) {
                 target.failWrite(output);
-                throw new IOException("读取数据包失败。请选择原始画师数据文件。", failure);
+                throw new IOException("读取失败。请选择原始画师数据文件或自制图片 ZIP。", failure);
             }
         }
         String info = new JSONObject().put("name", name).put("uri", uri.toString()).toString();
         if (!metadata.edit().putString(id, info).commit()) throw new IOException("无法保存数据包目录。");
         return new JSONObject().put("id", id).put("name", name);
+    }
+
+    private static boolean hasZipHeader(BufferedInputStream input) throws IOException {
+        input.mark(4);
+        int p = input.read();
+        int k = input.read();
+        int kind = input.read();
+        int version = input.read();
+        input.reset();
+        return p == 'P' && k == 'K' && ((kind == 3 && version == 4) || (kind == 5 && version == 6));
+    }
+
+    private JSONObject importZip(InputStream source, long size, String name, IntConsumer progress,
+                                 RemotePackZip.Download remote) throws IOException, JSONException {
+        if (size > ImagePackZip.MAX_ZIP_BYTES) throw new IOException("ZIP 文件超过 256 MB，请拆成多个图包。");
+        synchronized (ZIP_IMPORT_LOCK) {
+            long budget = Math.min(ImagePackZip.MAX_ZIP_BYTES, MAX_ZIP_STORAGE - storedZipBytes());
+            budget = Math.min(budget, indexes.getUsableSpace() - STORAGE_RESERVE);
+            if (budget <= 0) throw new IOException("没有足够空间导入 ZIP 图包。");
+            File staged = File.createTempFile("zip-import-", ".tmp", indexes);
+            try {
+                progress.accept(-1);
+                ImagePackZip.Index index;
+                try (FileOutputStream output = new FileOutputStream(staged)) {
+                    index = ImagePackZip.read(source, output, MAX_IMAGE, budget);
+                }
+                if (remote != null) remote.finish();
+                File data = zipDataFile(index.id);
+                File catalogue = file(index.id);
+                if (metadata.contains(index.id) && catalogue.isFile() && data.isFile()) {
+                    JSONObject old = new JSONObject(metadata.getString(index.id, ""));
+                    progress.accept(100);
+                    return zipSummary(index.id, old.getString("name"));
+                }
+                if (data.exists() && !data.delete()) throw new IOException("无法清理旧的导入记录。");
+                if (!staged.renameTo(data)) throw new IOException("无法保存图包图片。");
+                AtomicFile target = new AtomicFile(catalogue);
+                boolean committed = false;
+                try {
+                    FileOutputStream output = target.startWrite();
+                    try {
+                        JsonWriter writer = new JsonWriter(new OutputStreamWriter(output, StandardCharsets.UTF_8));
+                        writer.beginArray();
+                        for (Map.Entry<String, List<ImagePackZip.Span>> row : index.rows.entrySet()) {
+                            writer.beginArray().value(row.getKey()).beginArray();
+                            for (ImagePackZip.Span image : row.getValue()) {
+                                writer.beginArray().value(image.offset).value(image.length).endArray();
+                            }
+                            writer.endArray().endArray();
+                        }
+                        writer.endArray();
+                        writer.flush();
+                        target.finishWrite(output);
+                    } catch (IOException | RuntimeException failure) {
+                        target.failWrite(output);
+                        throw failure;
+                    }
+                    String info = new JSONObject().put("name", name).put("format", "zip").toString();
+                    if (!metadata.edit().putString(index.id, info).commit()) throw new IOException("无法保存图包目录。");
+                    committed = true;
+                } finally {
+                    if (!committed) {
+                        metadata.edit().remove(index.id).commit();
+                        target.delete();
+                        data.delete();
+                    }
+                }
+                progress.accept(100);
+                return zipSummary(index.id, name);
+            } finally {
+                staged.delete();
+            }
+        }
+    }
+
+    JSONObject importRemoteZip(String url, IntConsumer progress) throws IOException, JSONException {
+        if (progress == null) throw new IllegalArgumentException("progress");
+        if (!indexes.isDirectory() && !indexes.mkdirs()) throw new IOException("无法保存目录索引。");
+        progress.accept(-1);
+        try (RemotePackZip.Download download = RemotePackZip.open(url, progress)) {
+            return importZip(download.input(), download.size(), download.name(), value -> {
+                if (value == 100) progress.accept(100);
+            }, download);
+        }
+    }
+
+    private long storedZipBytes() {
+        long size = 0;
+        File[] files = indexes.listFiles();
+        if (files == null) return size;
+        for (File stored : files) {
+            String name = stored.getName();
+            if (name.startsWith("zip-import-") && name.endsWith(".tmp")) {
+                stored.delete();
+            } else if (name.endsWith(".zip-data")) {
+                String id = name.substring(0, name.length() - ".zip-data".length());
+                if (!validId(id)) continue;
+                if (metadata.contains(id) && file(id).isFile()) size += stored.length();
+                else if (!stored.delete()) size += stored.length();
+            }
+        }
+        return size;
+    }
+
+    private static JSONObject zipSummary(String id, String name) throws JSONException {
+        return new JSONObject().put("id", id).put("name", name).put("format", "zip");
     }
 
     InputStream openIndex(String id) throws IOException {
@@ -92,7 +213,17 @@ final class LocalPacks {
         if (!validId(id) || offset < 0 || length < 1 || length > MAX_IMAGE || !metadata.contains(id)) {
             throw new IOException("Invalid pack preview");
         }
-        Uri uri = Uri.parse(new JSONObject(metadata.getString(id, "")).getString("uri"));
+        JSONObject info = new JSONObject(metadata.getString(id, ""));
+        if ("zip".equals(info.optString("format"))) {
+            try (RandomAccessFile data = new RandomAccessFile(zipDataFile(id), "r")) {
+                if (offset > data.length() - length) throw new IOException("Invalid ZIP image span");
+                byte[] image = new byte[length];
+                data.seek(offset);
+                data.readFully(image);
+                return image;
+            }
+        }
+        Uri uri = Uri.parse(info.getString("uri"));
         ParcelFileDescriptor descriptor = resolver.openFileDescriptor(uri, "r");
         if (descriptor == null) throw new IOException("Pack moved");
         try (ParcelFileDescriptor.AutoCloseInputStream input = new ParcelFileDescriptor.AutoCloseInputStream(descriptor)) {
@@ -124,6 +255,10 @@ final class LocalPacks {
 
     private File file(String id) {
         return new File(indexes, id + ".json");
+    }
+
+    private File zipDataFile(String id) {
+        return new File(indexes, id + ".zip-data");
     }
 
     private static boolean validId(String id) {

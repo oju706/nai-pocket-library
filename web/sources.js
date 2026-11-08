@@ -73,11 +73,15 @@ const PocketSources = (() => {
   }
 
   function koreanCards(index) {
-    return index.artists.map(([title, images]) => ({
+    const pack = index.source.id || 'curated';
+    const packName = pack === 'curated' ? 'Curated 精选' : `${pack}-Q`;
+    const imageRoot = pack === 'curated' ? '/korean-image' : `/korean-image/${pack}`;
+    return index.artists.map(([title, images, postCount]) => ({
       id: `korean:V5:${title}`, title, model: 'V5', section: 'artist',
-      source: '韩国原版 · bequiet', sourceUrl: index.source.post,
-      prompt: `artist:${title}`, note: '来自原作者 Curated 精选库。预览图直接按需读取原作者发布文件中的对应片段，不使用 NAX 的图片替代。',
-      photos: images.map(([offset, size], number) => ({ url: `/korean-image/${offset}/${size}`, label: `bequiet 原版 · ${number + 1}` })),
+      source: `韩国原版 · ${packName}`, sourceUrl: index.source.post,
+      prompt: `artist:${title}`, note: `样图来自 bequiet 的 ${packName}，打开时按需读取。`,
+      photos: images.map(([offset, size], number) => ({ url: `${imageRoot}/${offset}/${size}`, label: `${packName} · ${number + 1}` })),
+      ...(Number.isSafeInteger(postCount) && postCount >= 0 ? { postCount } : {}),
     })).sort((a, b) => a.title.localeCompare(b.title, 'en'));
   }
 

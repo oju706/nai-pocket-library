@@ -8,8 +8,10 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <title>NAI 口袋词库</title>
   <link rel="stylesheet" href="./style.css">
+  <link rel="stylesheet" href="./gallery.css">
   <script src="./sources.js" defer></script>
   <script src="./app.js" defer></script>
+  <script src="./gallery.js" defer></script>
 </head>
 <body>
   <svg class="symbols" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -32,6 +34,7 @@
       <div class="top-actions"><button id="tools" class="soft compact" type="button">工具</button><button id="add" class="primary compact" type="button"><svg><use href="#i-plus"/></svg>新增</button></div>
     </header>
     <main id="main">
+      <div id="update-notice" class="update-notice" aria-live="polite" hidden></div>
       <section class="intro">
         <p id="eyebrow" class="eyebrow"></p>
         <h1 id="title"></h1>
@@ -48,6 +51,7 @@
       <div id="resource-tabs" class="filters" aria-label="知识资源范围"></div>
       <div id="filters" class="filters" aria-label="分类筛选"></div>
       <div id="view-options" class="view-options" aria-label="显示方式"></div>
+      <div id="artist-discovery" class="artist-discovery" aria-label="画师浏览" hidden></div>
       <div id="list-meta" class="list-meta" aria-live="polite"></div>
       <div id="results"></div>
     </main>
@@ -55,6 +59,7 @@
       <button type="button" data-section="character"><svg><use href="#i-character"/></svg>同人角色</button>
       <button type="button" data-section="artist"><svg><use href="#i-artist"/></svg>画师</button>
       <button type="button" data-section="knowledge"><svg><use href="#i-book"/></svg>画面提示词知识</button>
+      <button type="button" id="gallery"><svg><use href="#i-image"/></svg>图库</button>
     </nav>
   </div>
 
