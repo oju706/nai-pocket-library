@@ -18,7 +18,7 @@ const sections = {
 };
 const state = {
   section: 'artist', mode: 'online', model: 'V5', kind: 'all', knowledgeTab: 'basic', artistSource: 'korean',
-  limit: pageSize, online: null, onlineTask: null, onlineError: false, hasOnline: false,
+  page: 0, online: null, onlineTask: null, onlineError: false, hasOnline: false,
   personal: [], personalError: false, packs: [], pack: null, packRows: [],
   packMessage: '', importing: false, importingRemote: false,
   artistGroup: 'all', galleryFocus: false, galleryColumns: 3, artistShuffle: 0, artistOrder: 'name',
@@ -185,6 +185,54 @@ function button(label, className, click, glyph) {
   }
   el.addEventListener('click', click);
   return el;
+}
+
+let pageJumpSequence = 0;
+function pageJump(current, pages, move) {
+  const form = node('form', 'page-jump');
+  const input = node('input');
+  input.type = 'text';
+  input.inputMode = 'numeric';
+  input.enterKeyHint = 'go';
+  input.maxLength = 12;
+  input.value = String(current + 1);
+  input.setAttribute('aria-label', `跳转页码，1 到 ${pages}`);
+  const jump = node('button', 'soft compact', '跳转');
+  jump.type = 'submit';
+  const error = node('p', 'page-error');
+  error.id = `page-error-${++pageJumpSequence}`;
+  error.setAttribute('role', 'status');
+  error.hidden = true;
+  input.setAttribute('aria-describedby', error.id);
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const value = input.value.normalize('NFKC').trim();
+    const target = Number(value);
+    if (!/^\d+$/.test(value) || target < 1 || target > pages) {
+      input.setAttribute('aria-invalid', 'true');
+      error.textContent = `请输入 1–${pages} 的页码。`;
+      error.hidden = false;
+      input.focus();
+      return;
+    }
+    input.removeAttribute('aria-invalid');
+    error.hidden = true;
+    input.value = String(target);
+    move(target - 1);
+  });
+  form.append(node('span', '', `${current + 1} / ${pages} 页`), input, jump, error);
+  return form;
+}
+
+function pageSteps(current, pages, move) {
+  const nav = node('nav', 'page-steps');
+  nav.setAttribute('aria-label', '分页');
+  const previous = button('上一页', 'soft', () => move(current - 1));
+  const next = button('下一页', 'soft', () => move(current + 1));
+  previous.disabled = current === 0;
+  next.disabled = current === pages - 1;
+  nav.append(previous, node('span', '', `${current + 1} / ${pages} 页`), next);
+  return nav;
 }
 
 let toastTimer;
@@ -364,7 +412,7 @@ async function selectPack(id) {
   state.pack = pack || null;
   state.packRows = [];
   state.packMessage = pack ? '正在读取目录…' : '';
-  state.limit = pageSize;
+  resetPage();
   render();
   if (!pack) return;
   try {
@@ -382,9 +430,10 @@ async function selectPack(id) {
 async function importPack(address = '') {
   if (state.importing) return;
   const remote = typeof address === 'string' && address.trim();
+  if (state.section !== 'artist' || state.mode !== 'online') resetPage();
   state.section = 'artist';
   state.mode = 'online';
-  state.galleryFocus = false;
+  if (state.galleryFocus) setGalleryLayout(false);
   state.importing = true;
   state.importingRemote = Boolean(remote);
   state.packMessage = remote ? '正在准备下载图包…' : '请选择原版画师数据包或自制 ZIP…';
@@ -471,10 +520,26 @@ function chooseMode(mode) {
   resetResults();
 }
 
+function resetPage() {
+  state.page = 0;
+  main.scrollTop = 0;
+}
+
+function resultPageSize() {
+  return state.galleryFocus ? state.galleryColumns * 12 : pageSize;
+}
+
+function setGalleryLayout(focus, columns = state.galleryColumns) {
+  const anchor = state.page * resultPageSize();
+  state.galleryFocus = focus;
+  state.galleryColumns = columns;
+  state.page = Math.floor(anchor / resultPageSize());
+  main.scrollTop = 0;
+}
+
 function resetResults() {
   query.value = '';
-  state.limit = pageSize;
-  main.scrollTop = 0;
+  resetPage();
   render();
 }
 
@@ -516,7 +581,7 @@ function renderArtistDiscovery() {
   const changeGroup = (value) => {
     state.artistGroup = value;
     state.artistShuffle = 0;
-    state.limit = pageSize;
+    resetPage();
     render();
   };
   groups.addEventListener('change', () => {
@@ -538,11 +603,10 @@ function renderArtistDiscovery() {
   if (state.section === 'artist') {
     toolbar.append(button('换一批', 'soft compact', () => {
       state.artistShuffle = (Math.random() * 0xffffffff >>> 0) || 1;
-      state.limit = pageSize;
+      resetPage();
       render();
     }), button(state.galleryFocus ? '退出图墙' : '全屏图墙', 'soft compact', () => {
-      state.galleryFocus = !state.galleryFocus;
-      main.scrollTop = 0;
+      setGalleryLayout(!state.galleryFocus);
       render();
     }));
   }
@@ -552,7 +616,8 @@ function renderArtistDiscovery() {
     if (state.galleryFocus) {
       for (const columns of [2, 3, 4]) {
         controls.append(chip(`${columns} 列`, state.galleryColumns === columns, () => {
-          state.galleryColumns = columns;
+          if (state.galleryColumns === columns) return;
+          setGalleryLayout(true, columns);
           render();
         }));
       }
@@ -568,19 +633,19 @@ function renderArtistDiscovery() {
       postCounts.setAttribute('aria-describedby', 'artist-post-band-note');
       postCounts.addEventListener('change', () => {
         state.artistPostBand = postCounts.value;
-        state.limit = pageSize;
-        main.scrollTop = 0;
+        resetPage();
         render();
       });
       controls.append(postCounts, chip('按作品数', state.artistOrder === 'posts' && !state.artistShuffle, () => {
         state.artistOrder = state.artistOrder === 'posts' && !state.artistShuffle ? 'name' : 'posts';
         state.artistShuffle = 0;
-        state.limit = pageSize;
+        resetPage();
         render();
       }));
     }
     if (state.artistShuffle) controls.append(button('恢复排序', 'text-button', () => {
       state.artistShuffle = 0;
+      resetPage();
       render();
     }));
     tools.append(controls);
@@ -603,7 +668,7 @@ function renderCharacterFilters(target) {
     const select = options(choices, state.characterFilters[key] || '');
     select.addEventListener('change', () => {
       state.characterFilters[key] = select.value;
-      state.limit = pageSize;
+      resetPage();
       renderList();
     });
     panel.append(field(label, select));
@@ -637,8 +702,7 @@ function render() {
       state.artistSource = id;
       state.model = id === 'imported' ? 'pack' : 'V5';
       state.artistShuffle = 0;
-      state.limit = pageSize;
-      main.scrollTop = 0;
+      resetPage();
       if (id === 'imported') selectPack(state.pack?.id || state.packs[0]?.id);
       else if (id === 'korean') ensureKorean();
       else if (state.hasOnline) ensureOnline();
@@ -654,7 +718,7 @@ function render() {
         resourceTabs.append(chip(label, state.knowledgeTab === value, () => {
           state.knowledgeTab = value;
           state.kind = 'all';
-          state.limit = pageSize;
+          resetPage();
           if (state.hasOnline && isRemote()) ensureOnline();
           render();
         }));
@@ -666,7 +730,7 @@ function render() {
     for (const [value, label] of visibleKinds) {
       filters.append(chip(label, state.kind === value, () => {
         state.kind = value;
-        state.limit = pageSize;
+        resetPage();
         render();
       }));
     }
@@ -680,7 +744,7 @@ function render() {
         } else {
           state.model = model;
           state.kind = 'all';
-          state.limit = pageSize;
+          resetPage();
           if (isRemote() && state.hasOnline) ensureOnline();
           render();
         }
@@ -707,7 +771,7 @@ function render() {
       state.koreanPack = picker.value;
       state.korean = null;
       state.koreanStatus = '';
-      state.limit = pageSize;
+      resetPage();
       ensureKorean();
       render();
     });
@@ -872,6 +936,7 @@ function renderList() {
   else if (korean && state.artistOrder === 'posts') matching.sort((a, b) => (b.postCount ?? -1) - (a.postCount ?? -1));
   meta.prepend(node('span', '', `${number.format(matching.length)} 条`));
   if (!matching.length) {
+    state.page = 0;
     if (terms.length || state.artistGroup !== 'all' || postBand !== 'all' || (knowledge && state.kind !== 'all') ||
         (state.section === 'character' && Object.values(state.characterFilters).some(Boolean))) {
       empty('没有匹配的条目', postBand === 'all' ? '换个名称分类，或试试更短的关键词。' : '试试其他作品数分档、名称分类或更短的关键词。', button('清除筛选', 'soft', () => {
@@ -887,16 +952,22 @@ function renderList() {
     else empty('这里还没有条目', knowledge && remote ? '在线图鉴目前只有发型和表情；V5 暂无表情图库。可切换模型或进入中文知识查看其他分类。' : '可以切换分类，或重新导入已有数据包。');
     return;
   }
+  const capacity = resultPageSize();
+  const pages = Math.ceil(matching.length / capacity);
+  state.page = Math.min(state.page, pages - 1);
+  const start = state.page * capacity;
+  function move(target) {
+    if (target < 0 || target >= pages || target === state.page) return;
+    state.page = target;
+    renderList();
+    main.scrollTop = 0;
+  }
+  if (pages > 1) results.append(pageJump(state.page, pages, move));
   const list = node('div', state.galleryFocus ? `gallery gallery-${state.galleryColumns} dense-gallery`
     : views[state.section] === 'grid' ? 'gallery' : 'list');
-  list.append(...matching.slice(0, state.limit).map(row));
+  list.append(...matching.slice(start, start + capacity).map(row));
   results.append(list);
-  if (matching.length > state.limit) {
-    results.append(button('再显示 ' + Math.min(pageSize, matching.length - state.limit) + ' 条', 'soft more', () => {
-      state.limit += pageSize;
-      renderList();
-    }));
-  }
+  if (pages > 1) results.append(pageSteps(state.page, pages, move));
   if (remote) {
     const info = node('p', 'source-info', '在线图库 · NAX / Carlyone · CC BY 4.0。');
     info.append(button('来源', 'text-button', () => openLink(PocketSources.nax)));
@@ -1722,14 +1793,14 @@ byId('nav').addEventListener('click', (event) => {
 });
 let queryTimer;
 query.addEventListener('input', () => {
-  state.limit = pageSize;
+  resetPage();
   clearTimeout(queryTimer);
   queryTimer = setTimeout(renderList, 80);
 });
 screen.addEventListener('cancel', (event) => { event.preventDefault(); goBack(); });
 window.PocketBack = () => {
   if (screen.open) { goBack(); return true; }
-  if (state.galleryFocus) { state.galleryFocus = false; render(); return true; }
+  if (state.galleryFocus) { setGalleryLayout(false); render(); return true; }
   if (state.mode === 'online') { chooseMode('personal'); return true; }
   return false;
 };

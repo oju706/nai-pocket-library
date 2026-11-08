@@ -49,42 +49,6 @@
     return groups;
   }
 
-  function pageJump(current, pages, move) {
-    const form = node('form', 'online-pack-page-jump');
-    const input = node('input');
-    input.type = 'text';
-    input.inputMode = 'numeric';
-    input.enterKeyHint = 'go';
-    input.maxLength = 12;
-    input.value = String(current + 1);
-    input.setAttribute('aria-label', `跳转页码，1 到 ${pages}`);
-    input.setAttribute('aria-describedby', 'online-pack-page-error');
-    const jump = node('button', 'soft compact', '跳转');
-    jump.type = 'submit';
-    const error = node('p', 'online-pack-note online-pack-page-error');
-    error.id = 'online-pack-page-error';
-    error.setAttribute('role', 'status');
-    error.hidden = true;
-    form.addEventListener('submit', (event) => {
-      event.preventDefault();
-      const value = input.value.normalize('NFKC').trim();
-      const target = Number(value);
-      if (!/^\d+$/.test(value) || target < 1 || target > pages) {
-        input.setAttribute('aria-invalid', 'true');
-        error.textContent = `请输入 1–${pages} 的页码。`;
-        error.hidden = false;
-        input.focus();
-        return;
-      }
-      input.removeAttribute('aria-invalid');
-      error.hidden = true;
-      input.value = String(target);
-      move(target - 1);
-    });
-    form.append(node('span', 'online-pack-note', `${current + 1} / ${pages} 页`), input, jump, error);
-    return form;
-  }
-
   function showPack(back, mode) {
     const remote = mode === 'remote';
     const local = mode === 'local';
@@ -622,15 +586,7 @@
           } else {
             view.append(grid(pageImages));
           }
-          if (pages > 1) {
-            const nav = node('div', 'online-pack-pagination');
-            const previous = button('上一页', 'soft', () => move(page - 1));
-            const next = button('下一页', 'soft', () => move(page + 1));
-            previous.disabled = page === 0;
-            next.disabled = page === pages - 1;
-            nav.append(previous, node('span', 'online-pack-note', `${page + 1} / ${pages} 页`), next);
-            view.append(nav);
-          }
+          if (pages > 1) view.append(pageSteps(page, pages, move));
         }
         const toolbar = node('div', 'online-pack-export');
         const count = node('p', 'online-pack-note');

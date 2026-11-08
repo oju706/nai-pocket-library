@@ -7,6 +7,8 @@ const galleryDateFormatter = new Intl.DateTimeFormat('zh-CN', {
   day: '2-digit',
 });
 let gallerySession = 0;
+let galleryPage = 0;
+let galleryScroll = 0;
 
 function galleryDateValue(value) {
   if (typeof value === 'number' && Number.isFinite(value)) {
@@ -64,7 +66,9 @@ function galleryImageUrl(item, thumbnail) {
 
 function galleryThumbnail(item, session) {
   const tile = button('', 'nai-gallery-tile', () => {
-    if (session === gallerySession) showGalleryDetail(item);
+    if (session !== gallerySession) return;
+    galleryScroll = body.scrollTop;
+    showGalleryDetail(item);
   });
   tile.setAttribute('aria-label', `查看原图：${galleryItemAlt(item)}`);
 
@@ -108,11 +112,12 @@ function galleryEmptyState() {
 
 async function galleryImport(session, trigger) {
   if (session !== gallerySession) return;
+  const revision = screenRevision;
   trigger.disabled = true;
   trigger.textContent = '正在导入…';
   try {
     const result = await native('importGallery');
-    if (session !== gallerySession) return;
+    if (session !== gallerySession || revision !== screenRevision) return;
     if (!result) {
       trigger.disabled = false;
       trigger.textContent = '导入原图';
@@ -120,14 +125,14 @@ async function galleryImport(session, trigger) {
     }
     const added = Number.isFinite(Number(result.added)) ? Number(result.added) : 0;
     const skipped = Number.isFinite(Number(result.skipped)) ? Number(result.skipped) : 0;
-    showGallery();
+    showGallery(0);
     if (added || skipped) {
       toast(result.message || `已导入 ${added} 张原图${skipped ? `，跳过 ${skipped} 张` : ''}`);
     } else {
       toast('没有新增原图');
     }
   } catch (error) {
-    if (session !== gallerySession) return;
+    if (session !== gallerySession || revision !== screenRevision) return;
     trigger.disabled = false;
     trigger.textContent = '导入原图';
     toast(error && error.message ? error.message : '导入原图失败。');
@@ -139,8 +144,9 @@ function galleryListActions(session) {
   actions.replaceChildren(trigger);
 }
 
-async function galleryLoad(session) {
+async function galleryLoad(session, requestedPage, requestedScroll) {
   openScreen('原图图库');
+  const revision = screenRevision;
   galleryListActions(session);
 
   const loading = node('div', 'nai-gallery-loading', '正在读取本地图库…');
@@ -149,7 +155,7 @@ async function galleryLoad(session) {
 
   try {
     const listed = await native('listGallery');
-    if (session !== gallerySession) return;
+    if (session !== gallerySession || revision !== screenRevision) return;
     if (!Array.isArray(listed)) throw new Error('图库数据格式不正确。');
 
     const items = listed
@@ -172,31 +178,49 @@ async function galleryLoad(session) {
     body.append(heading);
 
     if (!items.length) {
+      galleryPage = 0;
+      galleryScroll = 0;
       body.append(galleryEmptyState());
       return;
     }
 
     const grid = node('div', 'nai-gallery-grid');
+    const pageJumpHost = node('div');
     const footer = node('div', 'nai-gallery-footer');
-    body.append(grid, footer);
-    let shown = 0;
+    const pages = Math.ceil(items.length / galleryPageSize);
+    let page = Math.min(Math.max(requestedPage, 0), pages - 1);
+    galleryPage = page;
+    galleryScroll = page === requestedPage ? requestedScroll : 0;
+    body.append(pageJumpHost, grid, footer);
 
-    function renderNextBatch() {
-      if (session !== gallerySession) return;
-      const end = Math.min(shown + galleryPageSize, items.length);
-      for (; shown < end; shown++) grid.append(galleryThumbnail(items[shown], session));
+    function renderPage() {
+      if (session !== gallerySession || revision !== screenRevision) return;
+      const start = page * galleryPageSize;
+      const end = Math.min(start + galleryPageSize, items.length);
+      grid.replaceChildren(...items.slice(start, end).map(item => galleryThumbnail(item, session)));
+      pageJumpHost.replaceChildren();
       footer.replaceChildren();
-      if (shown < items.length) {
-        footer.append(node('span', 'nai-gallery-count', `已显示 ${shown} / ${items.length}`));
-        footer.append(button('加载更多', 'soft', renderNextBatch));
-      } else if (items.length > galleryPageSize) {
-        footer.append(node('span', 'nai-gallery-count', `已显示全部 ${items.length} 张`));
+      if (pages > 1) {
+        function move(target) {
+          if (!Number.isInteger(target) || target < 0 || target >= pages || target === page) return;
+          page = target;
+          galleryPage = page;
+          galleryScroll = 0;
+          renderPage();
+          body.scrollTop = 0;
+        }
+        pageJumpHost.append(pageJump(page, pages, move));
+        footer.append(
+          node('span', 'nai-gallery-count', `第 ${start + 1}–${end} 张，共 ${items.length} 张`),
+          pageSteps(page, pages, move),
+        );
       }
     }
 
-    renderNextBatch();
+    renderPage();
+    body.scrollTop = galleryScroll;
   } catch (error) {
-    if (session !== gallerySession) return;
+    if (session !== gallerySession || revision !== screenRevision) return;
     body.replaceChildren();
     const failure = node('div', 'nai-gallery-empty nai-gallery-failure');
     failure.append(
@@ -204,7 +228,7 @@ async function galleryLoad(session) {
       node('p', '', error && error.message ? error.message : '请稍后重试。'),
     );
     const retry = button('重新读取', 'primary', () => {
-      if (session === gallerySession) galleryLoad(session);
+      if (session === gallerySession) galleryLoad(session, galleryPage, galleryScroll);
     });
     failure.append(retry);
     body.append(failure);
@@ -216,9 +240,11 @@ async function galleryLoad(session) {
   }
 }
 
-function showGallery() {
+function showGallery(page = 0, scroll = 0) {
   const session = ++gallerySession;
-  galleryLoad(session);
+  galleryPage = Number.isInteger(page) ? page : 0;
+  galleryScroll = scroll;
+  galleryLoad(session, galleryPage, galleryScroll);
 }
 
 function galleryDetailImage(item) {
@@ -283,7 +309,10 @@ function galleryDetailImage(item) {
 
 function showGalleryDetail(item) {
   const session = ++gallerySession;
-  openScreen('原图详情', showGallery);
+  const returnToGallery = () => showGallery(galleryPage, galleryScroll);
+  openScreen('原图详情', returnToGallery);
+  const revision = screenRevision;
+  const active = () => session === gallerySession && revision === screenRevision;
 
   const date = galleryFormatDate(item.createdAt);
   const type = item.kind === 'preview' ? '小预览' : '旧版完整副本';
@@ -296,12 +325,12 @@ function showGalleryDetail(item) {
   body.append(galleryDetailImage(item), heading);
 
   const metadataButton = button('查看提示词 / 参数', 'primary', async () => {
-    if (session !== gallerySession) return;
+    if (!active()) return;
     metadataButton.disabled = true;
     metadataButton.textContent = '正在读取…';
     try {
       const summary = await native('galleryMetadata', item.id);
-      if (session !== gallerySession) return;
+      if (!active()) return;
       if (!summary) {
         toast('这张原图没有可读取的生成信息。');
         metadataButton.disabled = false;
@@ -313,7 +342,7 @@ function showGalleryDetail(item) {
         galleryItem: item,
       });
     } catch (error) {
-      if (session !== gallerySession) return;
+      if (!active()) return;
       metadataButton.disabled = false;
       metadataButton.textContent = '查看提示词 / 参数';
       toast(error && error.message ? error.message : '读取生成信息失败。');
@@ -321,7 +350,7 @@ function showGalleryDetail(item) {
   });
 
   const remove = button('从图库删除', 'subtle danger compact', async () => {
-    if (session !== gallerySession) return;
+    if (!active()) return;
     const message = item.kind === 'preview'
       ? '删除此条目的小预览和已保存的生成信息？手机原文件会保留。'
       : '删除 App 内的完整副本和已保存的生成信息？手机原文件会保留。';
@@ -330,11 +359,11 @@ function showGalleryDetail(item) {
     metadataButton.disabled = true;
     try {
       const deleted = await native('deleteGalleryImage', item.id);
-      if (session !== gallerySession) return;
-      showGallery();
+      if (!active()) return;
+      returnToGallery();
       toast(deleted ? '已从图库删除' : '此条目已不存在');
     } catch (error) {
-      if (session !== gallerySession) return;
+      if (!active()) return;
       toast(error.message || '无法删除，请重试。');
       remove.disabled = false;
       metadataButton.disabled = false;
@@ -343,7 +372,7 @@ function showGalleryDetail(item) {
   heading.append(remove);
   actions.replaceChildren(
     button('返回图库', 'soft', () => {
-      if (session === gallerySession) showGallery();
+      if (active()) returnToGallery();
     }),
     metadataButton,
   );

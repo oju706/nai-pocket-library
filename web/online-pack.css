@@ -87,10 +87,6 @@
 .online-pack-view-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .online-pack-post-group h3 { margin: 3px 0 6px; color: var(--accent-ink); font-size: 14px; }
 .online-pack-post-group h3 button { padding: 0; text-align: left; font-size: inherit; }
-.online-pack-page-jump { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.online-pack-page-jump input { width: 4.5rem; min-height: 44px; padding: 5px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); font-size: 16px; text-align: center; }
-.online-pack-page-jump input[aria-invalid="true"] { border-color: var(--error); }
-.online-pack-page-error { flex-basis: 100%; color: var(--error); }
 .online-pack-pagination { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .online-pack-export { width: 100%; display: grid; gap: 6px; }
 .online-pack-export-buttons { display: flex; gap: 8px; }

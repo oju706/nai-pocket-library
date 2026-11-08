@@ -119,9 +119,7 @@
   padding: 18px 0 4px;
 }
 
-.nai-gallery-footer .soft {
-  min-width: 132px;
-}
+.nai-gallery-footer .page-steps { width: 100%; }
 
 .nai-gallery-count {
   color: var(--muted, #606960);

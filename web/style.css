@@ -129,7 +129,12 @@ h2 { font-size: 19px; line-height: 1.35; margin: 0; }
 .empty p, .source-info { color: var(--muted); font-size: 13px; line-height: 1.55; }
 .empty p { margin: 6px 0 14px; }
 .empty .soft { margin: 0 4px 4px; }
-.more { width: 100%; margin-top: 10px; }
+.page-jump, .page-steps { display: flex; align-items: center; gap: 8px; margin: 8px 0; color: var(--muted); font-size: 13px; }
+.page-jump { flex-wrap: wrap; }
+.page-steps { justify-content: space-between; }
+.page-jump input { width: 4.5rem; min-height: 44px; padding: 5px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); font-size: 16px; text-align: center; }
+.page-jump input[aria-invalid="true"] { border-color: var(--error); }
+.page-error { flex-basis: 100%; margin: 0; color: var(--error); }
 .source-info { margin-top: 11px; }
 .nav { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 3px; padding: 6px 8px max(7px, env(safe-area-inset-bottom)); background: var(--surface); border-top: 1px solid var(--line); }
 .nav button { display: grid; justify-items: center; align-content: center; gap: 4px; min-height: 53px; padding: 3px 2px; font-size: 11px; color: var(--muted); background: transparent; font-weight: 650; }
