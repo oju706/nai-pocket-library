@@ -16,15 +16,20 @@ import org.json.JSONObject;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
+import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
-/** Mounts the community style archive through Android's file picker without unpacking it. */
+/** Reads local or online community style archives without unpacking them. */
 final class SharedStylePacks {
     static final String ORIGINAL_ROUTE = "shared-style-image";
     static final String PREVIEW_ROUTE = "shared-style-thumb";
+    static final String REMOTE_ORIGINAL_ROUTE = "remote-shared-style-image";
+    static final String REMOTE_PREVIEW_ROUTE = "remote-shared-style-thumb";
+    private static final URI ARTIST_CONFIG = URI.create(
+            "https://raw.githubusercontent.com/oju706/nai-pocket-library/main/resource-packs/artist.json");
     private static final int MAX_INDEX = 4 * 1024 * 1024;
     private static final int MAX_IMAGE = 12 * 1024 * 1024;
     private static final int READ = Intent.FLAG_GRANT_READ_URI_PERMISSION;
@@ -32,6 +37,7 @@ final class SharedStylePacks {
     private final ContentResolver resolver;
     private final SharedPreferences saved;
     private volatile Catalog current;
+    private volatile Catalog remote;
 
     SharedStylePacks(Context context) {
         resolver = context.getContentResolver();
@@ -45,6 +51,25 @@ final class SharedStylePacks {
         if (previous.isEmpty()) return null;
         current = readCatalog(Uri.parse(previous));
         return current.index;
+    }
+
+    JSONObject openRemote() throws IOException, JSONException {
+        byte[] configBytes = OnlinePacks.fetch(ARTIST_CONFIG, 16 * 1024);
+        JSONObject config = new JSONObject(new String(configBytes, StandardCharsets.UTF_8));
+        if (!"nai-pocket-resource-pack".equals(config.optString("format")) || config.optInt("version") != 1
+                || !"artist".equals(config.optString("section")) || !"shared-style-zip".equals(config.optString("kind"))) {
+            throw new IOException("默认资源仓库中的图包设置无效。");
+        }
+        SharedStyleRemote source = SharedStyleRemote.open(config.getString("source"), config.getLong("bytes"),
+                config.getString("manifestSha256"));
+        Catalog previous = remote;
+        if (previous != null && source.sourceUrl.equals(previous.remote.sourceUrl)
+                && source.size() == previous.remote.size() && source.manifestSha.equals(previous.remote.manifestSha)) {
+            return previous.index;
+        }
+        Catalog next = readCatalog(null, source, source);
+        remote = next;
+        return next.index;
     }
 
     JSONObject mount(Uri uri) throws IOException, JSONException {
@@ -79,46 +104,56 @@ final class SharedStylePacks {
 
     private Catalog readCatalog(Uri uri) throws IOException, JSONException {
         try (ParcelFileDescriptor.AutoCloseInputStream input = openFile(uri)) {
-            SharedStyleZip archive = SharedStyleZip.open(input.getChannel());
-            SharedStyleZip.Entry manifest = archive.get("manifest.json");
-            if (manifest == null) throw new IOException("ZIP 中没有社区画风图包目录。");
-            byte[] raw = archive.read(input.getChannel(), manifest, MAX_INDEX);
-            JSONObject data = new JSONObject(new String(raw, StandardCharsets.UTF_8));
-            JSONArray files = data.getJSONArray("files");
-            if (!"naimakeartistgroup-shared-images".equals(data.optString("format")) || data.optInt("version") != 2
-                    || files.length() < 1 || files.length() > 10000 || files.length() != data.optInt("file_count")) {
-                throw new IOException("请选择 NAImakeArtistGroup 的社区画风图包 ZIP。");
-            }
-            String revision = OnlinePacks.hex(OnlinePacks.sha256().digest(raw));
-            JSONArray images = new JSONArray();
-            Map<String, Photo> photos = new LinkedHashMap<>();
-            for (int i = 0; i < files.length(); i++) {
-                JSONObject row = files.getJSONObject(i);
-                String id = row.getString("image_id");
-                String name = row.getString("name");
-                String sha = row.getString("sha256");
-                String source = row.getString("source_url");
-                if (!id.matches("[0-9]{1,16}") || !name.matches("[a-f0-9]{64}\\.webp")
-                        || !sha.matches("[a-f0-9]{64}") || !source.startsWith(SOURCE_PREFIX)) throw invalidRow(i);
-                String postId = source.substring(SOURCE_PREFIX.length());
-                SharedStyleZip.Entry file = archive.get("arca_style_images/" + name);
-                if (!postId.matches("[0-9]{1,16}") || photos.containsKey(id) || file == null
-                        || file.bytes < 12 || file.bytes > MAX_IMAGE || file.bytes != row.optLong("bytes")) throw invalidRow(i);
-                photos.put(id, new Photo(file, sha));
-                String path = "/" + revision + "/" + id;
-                images.put(new JSONObject().put("id", id).put("title", "原帖 " + postId + " · 图 " + id)
-                        .put("section", "artist").put("rating", "unknown").put("model", "模型见生成信息")
-                        .put("bytes", file.bytes).put("source", source).put("postId", postId)
-                        .put("thumbnail", "/" + PREVIEW_ROUTE + path).put("original", "/" + ORIGINAL_ROUTE + path));
-            }
-            JSONObject index = new JSONObject().put("title", "Arca Live 社区画风合集")
-                    .put("revision", revision).put("images", images);
-            return new Catalog(uri, archive, revision, photos, index);
+            return readCatalog(uri, null, SharedStyleZip.channel(input.getChannel()));
         }
     }
 
-    byte[] photo(String revision, String id, boolean thumbnail) throws IOException {
-        Catalog catalog = catalog(revision);
+    private Catalog readCatalog(Uri uri, SharedStyleRemote online, SharedStyleZip.Source source) throws IOException, JSONException {
+        SharedStyleZip archive = SharedStyleZip.open(source);
+        SharedStyleZip.Entry manifest = archive.get("manifest.json");
+        if (manifest == null) throw new IOException("ZIP 中没有社区画风图包目录。");
+        byte[] raw = archive.read(source, manifest, MAX_INDEX);
+        String digest = OnlinePacks.hex(OnlinePacks.sha256().digest(raw));
+        if (online != null && !online.manifestSha.equals(digest)) throw new IOException("在线图包与仓库目录校验不一致。");
+        JSONObject data = new JSONObject(new String(raw, StandardCharsets.UTF_8));
+        JSONArray files = data.getJSONArray("files");
+        if (!"naimakeartistgroup-shared-images".equals(data.optString("format")) || data.optInt("version") != 2
+                || files.length() < 1 || files.length() > 10000 || files.length() != data.optInt("file_count")) {
+            throw new IOException("请选择 NAImakeArtistGroup 的社区画风图包 ZIP。");
+        }
+        String revision = online == null ? digest : OnlinePacks.hex(OnlinePacks.sha256()
+                .digest((online.sourceUrl + "\n" + digest).getBytes(StandardCharsets.UTF_8)));
+        String previewRoute = online == null ? PREVIEW_ROUTE : REMOTE_PREVIEW_ROUTE;
+        String originalRoute = online == null ? ORIGINAL_ROUTE : REMOTE_ORIGINAL_ROUTE;
+        JSONArray images = new JSONArray();
+        Map<String, Photo> photos = new LinkedHashMap<>();
+        for (int i = 0; i < files.length(); i++) {
+            JSONObject row = files.getJSONObject(i);
+            String id = row.getString("image_id");
+            String name = row.getString("name");
+            String sha = row.getString("sha256");
+            String post = row.getString("source_url");
+            if (!id.matches("[0-9]{1,16}") || !name.matches("[a-f0-9]{64}\\.webp")
+                    || !sha.matches("[a-f0-9]{64}") || !post.startsWith(SOURCE_PREFIX)) throw invalidRow(i);
+            String postId = post.substring(SOURCE_PREFIX.length());
+            SharedStyleZip.Entry file = archive.get("arca_style_images/" + name);
+            if (!postId.matches("[0-9]{1,16}") || photos.containsKey(id) || file == null
+                    || file.bytes < 12 || file.bytes > MAX_IMAGE || file.bytes != row.optLong("bytes")) throw invalidRow(i);
+            photos.put(id, new Photo(file, sha));
+            String path = "/" + revision + "/" + id;
+            images.put(new JSONObject().put("id", id).put("title", "原帖 " + postId + " · 图 " + id)
+                    .put("section", "artist").put("rating", "unknown").put("model", "模型见生成信息")
+                    .put("bytes", file.bytes).put("source", post).put("postId", postId)
+                    .put("thumbnail", "/" + previewRoute + path).put("original", "/" + originalRoute + path));
+        }
+        JSONObject index = new JSONObject().put("title", "Arca Live 社区画风合集")
+                .put("revision", revision).put("images", images);
+        if (online != null) index.put("downloadUrl", online.sourceUrl);
+        return new Catalog(uri, online, archive, revision, photos, index);
+    }
+
+    byte[] photo(String revision, String id, boolean thumbnail, boolean online) throws IOException {
+        Catalog catalog = catalog(revision, online);
         byte[] bytes = original(catalog, id);
         if (!thumbnail) return bytes;
         Bitmap image = ImageDecoder.decodeBitmap(ImageDecoder.createSource(ByteBuffer.wrap(bytes)), (decoder, info, source) -> {
@@ -136,9 +171,9 @@ final class SharedStylePacks {
         }
     }
 
-    OnlinePacks.Export prepareExport(String request, File cache) throws IOException, JSONException {
+    OnlinePacks.Export prepareExport(String request, File cache, boolean online) throws IOException, JSONException {
         JSONObject selection = new JSONObject(request);
-        Catalog catalog = catalog(selection.getString("revision"));
+        Catalog catalog = catalog(selection.getString("revision"), online);
         return OnlinePacks.export(selection, cache, id -> {
             Photo image = catalog.photos.get(id);
             return image == null ? 0 : image.entry.bytes;
@@ -148,14 +183,19 @@ final class SharedStylePacks {
     private byte[] original(Catalog catalog, String id) throws IOException {
         Photo photo = catalog.photos.get(id);
         if (photo == null) throw new IOException("这张图片不在已选图包中。");
+        if (catalog.remote != null) return original(catalog, photo, catalog.remote);
         try (ParcelFileDescriptor.AutoCloseInputStream input = openFile(catalog.uri)) {
-            byte[] bytes = catalog.archive.read(input.getChannel(), photo.entry, MAX_IMAGE);
-            if (!"image/webp".equals(NaxLibrary.imageType(bytes))
-                    || !photo.sha.equals(OnlinePacks.hex(OnlinePacks.sha256().digest(bytes)))) {
-                throw new IOException("图片与图包目录不符，请重新选择完整 ZIP。");
-            }
-            return bytes;
+            return original(catalog, photo, SharedStyleZip.channel(input.getChannel()));
         }
+    }
+
+    private byte[] original(Catalog catalog, Photo photo, SharedStyleZip.Source source) throws IOException {
+        byte[] bytes = catalog.archive.read(source, photo.entry, MAX_IMAGE);
+        if (!"image/webp".equals(NaxLibrary.imageType(bytes))
+                || !photo.sha.equals(OnlinePacks.hex(OnlinePacks.sha256().digest(bytes)))) {
+            throw new IOException("图片与图包目录不符，请重新检查图包。");
+        }
+        return bytes;
     }
 
     private ParcelFileDescriptor.AutoCloseInputStream openFile(Uri uri) throws IOException {
@@ -169,8 +209,8 @@ final class SharedStylePacks {
         throw new IOException("原 ZIP 无法打开，请重新选择。");
     }
 
-    private Catalog catalog(String revision) throws IOException {
-        Catalog catalog = current;
+    private Catalog catalog(String revision, boolean online) throws IOException {
+        Catalog catalog = online ? remote : current;
         if (catalog == null || !catalog.revision.equals(revision)) throw new IOException("图包已更换，请重新打开。");
         return catalog;
     }
@@ -181,12 +221,14 @@ final class SharedStylePacks {
 
     private static final class Catalog {
         final Uri uri;
+        final SharedStyleRemote remote;
         final SharedStyleZip archive;
         final String revision;
         final Map<String, Photo> photos;
         final JSONObject index;
-        Catalog(Uri uri, SharedStyleZip archive, String revision, Map<String, Photo> photos, JSONObject index) {
+        Catalog(Uri uri, SharedStyleRemote remote, SharedStyleZip archive, String revision, Map<String, Photo> photos, JSONObject index) {
             this.uri = uri;
+            this.remote = remote;
             this.archive = archive;
             this.revision = revision;
             this.photos = photos;

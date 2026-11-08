@@ -212,7 +212,7 @@ final class OnlinePacks {
                 && uri.getRawPath() != null && uri.getRawPath().startsWith("/");
     }
 
-    private static byte[] fetch(URI url, int limit) throws IOException {
+    static byte[] fetch(URI url, int limit) throws IOException {
         if (!secureRaw(url)) throw new IOException("在线图包仅从 GitHub Raw 读取。");
         HttpsURLConnection connection = (HttpsURLConnection) url.toURL().openConnection();
         connection.setConnectTimeout(12000);

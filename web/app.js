@@ -410,8 +410,9 @@ async function importPack(address = '') {
 function showPackSources() {
   openScreen('更多画师图包');
   if (window.Pocket) {
-    const online = toolSection('在线浏览图包', '填写 GitHub 资源仓库，选图查看提示词或保存原图。');
-    online.append(button('打开在线图包', 'primary', () => showOnlinePack(showPackSources)));
+    const online = toolSection('在线浏览图包', '内置社区画风图包打开即用，也可以填写自己的 GitHub 资源仓库。');
+    online.append(button('打开在线社区画风', 'primary', () => showRemoteSharedStylePack(showPackSources)),
+      button('自定义 GitHub 仓库', 'soft', () => showOnlinePack(showPackSources)));
     const shared = toolSection('韩国社区画风 ZIP', '直接读取手机里 NAImakeArtistGroup 的社区画风包。');
     shared.append(button('打开社区画风图包', 'primary', () => showSharedStylePack(showPackSources)));
   }
@@ -643,7 +644,8 @@ function render() {
       else if (state.hasOnline) ensureOnline();
       render();
     }));
-    if (window.Pocket) resourceTabs.append(button('在线图包', 'text-button', () => showOnlinePack()));
+    if (window.Pocket) resourceTabs.append(button('在线图包', 'text-button', () => showRemoteSharedStylePack()),
+      button('自定义图包', 'text-button', () => showOnlinePack()));
     resourceTabs.append(button('更多图包', 'text-button', showPackSources));
   }
   if (state.section === 'knowledge') {

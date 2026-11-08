@@ -1,0 +1,11 @@
+{
+  "format": "nai-pocket-resource-pack",
+  "version": 1,
+  "section": "artist",
+  "kind": "shared-style-zip",
+  "title": "Arca Live 社区画风合集",
+  "release": "20261024",
+  "source": "https://huggingface.co/datasets/okawaritsuika/nai-shared-styles/resolve/fb08d21298d0176592d2292c08c33791c5470f16/NAImakeArtistGroup_shared_images_20261024_webp.zip",
+  "bytes": 693983676,
+  "manifestSha256": "c77c724e0eb6ad794b5d5ae4d222215d7e9ab5408b02a91686ae542eab303b02"
+}

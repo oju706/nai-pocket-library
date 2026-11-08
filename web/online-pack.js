@@ -5,6 +5,7 @@
   const pageSize = 24;
   const maxCount = 20;
   const maxBytes = 32 * 1024 * 1024;
+  const sharedZipUrl = 'https://huggingface.co/datasets/okawaritsuika/nai-shared-styles/resolve/main/NAImakeArtistGroup_shared_images_20261024_webp.zip?download=true';
   const ratings = [['sfw', 'SFW'], ['nsfw', 'NSFW'], ['unknown', '未分级']];
   const sections = { artist: '画师', character: '同人角色', knowledge: '画面提示词知识' };
 
@@ -36,8 +37,12 @@
     return image;
   }
 
-  function showPack(back, shared) {
-    const packLabel = shared ? '共享画风图包' : '在线图包';
+  function showPack(back, mode) {
+    const remote = mode === 'remote';
+    const local = mode === 'local';
+    const shared = remote || local;
+    const packLabel = remote ? '在线社区画风' : local ? '共享画风图包' : '在线图包';
+    const saveAction = remote ? 'saveRemoteSharedStylePhotos' : local ? 'saveSharedStylePhotos' : 'saveOnlinePhotos';
     let address = '';
     if (!shared) {
       try { address = localStorage.getItem(addressKey) || ''; } catch { /* The address can still be entered. */ }
@@ -80,7 +85,7 @@
       saving = true;
       updateSave();
       try {
-        const result = await native(shared ? 'saveSharedStylePhotos' : 'saveOnlinePhotos', JSON.stringify({ revision, ids }));
+        const result = await native(saveAction, JSON.stringify({ revision, ids }));
         if (screen !== screenRevision) return;
         if (result === true) toast(ids.length === 1 ? '已保存原图' : '已保存原图 ZIP');
         else if (result !== null) throw new Error('没有收到保存结果。');
@@ -100,7 +105,7 @@
       const facts = [item.model, sections[item.section], item.source, sizeText(item.bytes)].filter(Boolean);
       const view = node('section', 'online-pack-detail');
       const original = button('查看完整原图', 'soft', () => showImage(!showOriginal));
-      const saveLabel = shared ? '保存原图' : '下载原图';
+      const saveLabel = local ? '保存原图' : '下载原图';
       const save = button(saveLabel, 'soft', () => savePhotos([item.id]));
       const metadata = button('查看提示词与参数', 'primary', async () => {
         metadata.disabled = true;
@@ -210,10 +215,20 @@
       const forgetZip = button('移除图包', 'soft compact', () => {
         if (confirm('移除 App 中的共享图包？手机原 ZIP 文件会保留。')) return loadShared('forgetSharedStylePack');
       });
+      const retry = button('重试读取在线图包', 'primary compact', () => loadCatalog());
+      retry.hidden = true;
       if (shared) {
         const tools = node('div', 'online-pack-heading');
-        tools.append(importZip, forgetZip);
-        source.append(node('p', 'online-pack-note', '在手机文件里选择共享画风 ZIP，直接浏览包内图片。'), tools, searchField, status);
+        if (remote) {
+          tools.append(retry,
+            button('导入本地 ZIP', 'soft compact', () => showPack(showList, 'local')),
+            button('自定义 GitHub 仓库', 'soft compact', () => showPack(showList, 'custom')));
+        } else {
+          tools.append(importZip, forgetZip);
+        }
+        tools.append(button('下载完整 ZIP', 'soft compact', () => openLink(catalog?.downloadUrl || sharedZipUrl)));
+        const description = remote ? '直接读取内置社区图包目录，图片按需加载。' : '在手机文件里选择共享画风 ZIP，直接浏览包内图片。';
+        source.append(node('p', 'online-pack-note', description), tools, searchField, status);
       } else {
         source.open = !catalog;
         form.append(field('GitHub 仓库或 online-pack.json 链接', input), submit);
@@ -233,7 +248,7 @@
         if (!catalog) return;
         const heading = node('div', 'online-pack-heading');
         heading.append(node('h2', '', catalog.title));
-        if (!shared) heading.append(button('检查图包更新', 'soft compact', () => loadCatalog(address, true)));
+        if (!local) heading.append(button('检查图包更新', 'soft compact', () => loadCatalog(address, true)));
         content.append(heading, node('p', 'online-pack-note', `目录共 ${catalog.images.length} 张，选图后可单张保存原图或多张保存为 ZIP。`));
         if (!shared) {
           const filters = node('div', 'segmented online-pack-filters');
@@ -328,30 +343,38 @@
 
       async function loadCatalog(url, checking = false) {
         if (submit.disabled || saving) return;
-        const feedback = checking ? progress : status;
+        const feedback = checking && !remote ? progress : status;
         const scroll = body.scrollTop;
         let changed = false;
         feedback.hidden = false;
-        if (!url) { feedback.textContent = '请填写公开的 GitHub 图包地址。'; return; }
+        if (!remote && !url) { feedback.textContent = '请填写公开的 GitHub 图包地址。'; return; }
         submit.disabled = true;
         input.disabled = true;
+        retry.disabled = search.disabled = true;
         feedback.textContent = checking ? '正在检查图包更新…' : '正在读取图包目录…';
         content.replaceChildren();
         actions.replaceChildren();
         try {
-          const result = await native('openOnlinePack', url);
+          const result = remote ? await native('openRemoteSharedStylePack') : await native('openOnlinePack', url);
           if (screen !== screenRevision) return;
           if (!result) throw new Error('图包目录格式不正确。');
           changed = replaceCatalog(result);
-          input.value = address = url;
-          try { localStorage.setItem(addressKey, address); } catch { /* Browsing does not require storage. */ }
-          source.open = false;
+          if (remote) {
+            retry.hidden = true;
+          } else {
+            input.value = address = url;
+            try { localStorage.setItem(addressKey, address); } catch { /* Browsing does not require storage. */ }
+            source.open = false;
+          }
           status.hidden = true;
           if (checking) toast(changed ? '图包目录已更新' : '图包目录已是最新');
         } catch (error) {
           if (screen !== screenRevision) return;
           const message = error?.message || '图包目录读取失败，请重试。';
-          if (checking) toast(message);
+          if (remote) {
+            retry.hidden = false;
+            status.textContent = message;
+          } else if (checking) toast(message);
           else {
             source.open = true;
             status.textContent = message;
@@ -360,6 +383,7 @@
           if (screen === screenRevision) {
             submit.disabled = false;
             input.disabled = false;
+            retry.disabled = search.disabled = false;
             progress.hidden = true;
             renderCatalog();
             if (checking && !changed) body.scrollTop = scroll;
@@ -377,7 +401,8 @@
         renderCatalog();
       });
       renderCatalog();
-      if (shared && !openedShared) {
+      if (remote && !catalog) loadCatalog();
+      if (local && !openedShared) {
         openedShared = true;
         loadShared('openSharedStylePack');
       }
@@ -386,6 +411,7 @@
     showList();
   }
 
-  window.showOnlinePack = (back = null) => showPack(back, false);
-  window.showSharedStylePack = (back = null) => showPack(back, true);
+  window.showOnlinePack = (back = null) => showPack(back, 'custom');
+  window.showSharedStylePack = (back = null) => showPack(back, 'local');
+  window.showRemoteSharedStylePack = (back = null) => showPack(back, 'remote');
 })();

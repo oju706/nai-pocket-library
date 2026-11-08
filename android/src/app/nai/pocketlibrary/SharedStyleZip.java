@@ -55,12 +55,16 @@ final class SharedStyleZip {
     }
 
     static SharedStyleZip open(FileChannel file) throws IOException {
-        long length = file.size();
+        return open(channel(file));
+    }
+
+    static SharedStyleZip open(Source source) throws IOException {
+        long length = source.size();
         if (length < END_HEADER || length > MAX_ARCHIVE) {
             throw new IOException("社区图包大小无效。请选择手机本地保存的 ZIP，大小最多 2 GiB。");
         }
         int tailLength = (int) Math.min(length, END_HEADER + 65535);
-        ByteBuffer tail = readAt(file, length - tailLength, tailLength);
+        ByteBuffer tail = readAt(source, length - tailLength, tailLength);
         int end = endOffset(tail);
         int count = unsignedShort(tail, end + 10);
         long directoryLength = unsignedInt(tail, end + 12);
@@ -71,7 +75,7 @@ final class SharedStyleZip {
                 || directoryOffset + directoryLength != length - tailLength + end) {
             throw invalidZip();
         }
-        ByteBuffer directory = readAt(file, directoryOffset, (int) directoryLength);
+        ByteBuffer directory = readAt(source, directoryOffset, (int) directoryLength);
         Map<String, Entry> entries = new HashMap<>();
         for (int i = 0; i < count; i++) {
             int offset = directory.position();
@@ -112,13 +116,17 @@ final class SharedStyleZip {
     }
 
     byte[] read(FileChannel file, Entry entry, int max) throws IOException {
-        if (entry == null || entries.get(entry.name) != entry || file.size() != archiveLength) {
+        return read(channel(file), entry, max);
+    }
+
+    byte[] read(Source source, Entry entry, int max) throws IOException {
+        if (entry == null || entries.get(entry.name) != entry || source.size() != archiveLength) {
             throw new IOException("图包文件已变化或缺少所需项目，请重新选择。");
         }
         if (entry.bytes > max || entry.compressed > (long) max + 65536) {
             throw new IOException("图包中的文件超过大小限制。");
         }
-        ByteBuffer local = readAt(file, entry.offset, LOCAL_HEADER);
+        ByteBuffer local = readAt(source, entry.offset, LOCAL_HEADER + entry.name.length());
         int nameLength = unsignedShort(local, 26);
         long dataOffset = entry.offset + LOCAL_HEADER + nameLength + unsignedShort(local, 28);
         if (local.getInt(0) != 0x04034b50 || unsignedShort(local, 6) != entry.flags
@@ -126,9 +134,9 @@ final class SharedStyleZip {
                 || dataOffset + entry.compressed > directoryOffset) {
             throw invalidZip();
         }
-        String localName = new String(readAt(file, entry.offset + LOCAL_HEADER, nameLength).array(), StandardCharsets.US_ASCII);
+        String localName = new String(local.array(), LOCAL_HEADER, nameLength, StandardCharsets.US_ASCII);
         if (!entry.name.equals(localName)) throw invalidZip();
-        byte[] compressed = readAt(file, dataOffset, entry.compressed).array();
+        byte[] compressed = readAt(source, dataOffset, entry.compressed).array();
         byte[] data = entry.method == STORED ? compressed : inflate(compressed, entry.bytes);
         CRC32 crc = new CRC32();
         crc.update(data);
@@ -160,14 +168,31 @@ final class SharedStyleZip {
         }
     }
 
-    private static ByteBuffer readAt(FileChannel file, long offset, int length) throws IOException {
-        ByteBuffer bytes = ByteBuffer.allocate(length).order(ByteOrder.LITTLE_ENDIAN);
-        while (bytes.hasRemaining()) {
-            int count = file.read(bytes, offset + bytes.position());
-            if (count <= 0) throw invalidZip();
-        }
-        bytes.flip();
-        return bytes;
+    private static ByteBuffer readAt(Source source, long offset, int length) throws IOException {
+        ByteBuffer bytes = source.read(offset, length);
+        if (bytes.remaining() != length) throw invalidZip();
+        return bytes.order(ByteOrder.LITTLE_ENDIAN);
+    }
+
+    static Source channel(FileChannel file) {
+        return new Source() {
+            public long size() throws IOException { return file.size(); }
+
+            public ByteBuffer read(long offset, int length) throws IOException {
+                ByteBuffer bytes = ByteBuffer.allocate(length);
+                while (bytes.hasRemaining()) {
+                    int count = file.read(bytes, offset + bytes.position());
+                    if (count <= 0) throw invalidZip();
+                }
+                bytes.flip();
+                return bytes;
+            }
+        };
+    }
+
+    interface Source {
+        long size() throws IOException;
+        ByteBuffer read(long offset, int length) throws IOException;
     }
 
     private static int endOffset(ByteBuffer tail) throws IOException {

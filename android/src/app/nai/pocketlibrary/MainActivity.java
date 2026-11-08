@@ -183,10 +183,15 @@ public final class MainActivity extends Activity {
             byte[] bytes = onlinePacks.photo(parts.get(1), parts.get(2), thumbnail);
             return response(NaxLibrary.imageType(bytes), new ByteArrayInputStream(bytes), false);
         }
-        if (count == 3 && (SharedStylePacks.ORIGINAL_ROUTE.equals(parts.get(0)) || SharedStylePacks.PREVIEW_ROUTE.equals(parts.get(0)))) {
-            boolean thumbnail = SharedStylePacks.PREVIEW_ROUTE.equals(parts.get(0));
-            byte[] bytes = sharedStyles.photo(parts.get(1), parts.get(2), thumbnail);
-            return response(NaxLibrary.imageType(bytes), new ByteArrayInputStream(bytes), false);
+        if (count == 3) {
+            String route = parts.get(0);
+            boolean localStyle = SharedStylePacks.ORIGINAL_ROUTE.equals(route) || SharedStylePacks.PREVIEW_ROUTE.equals(route);
+            boolean remoteStyle = SharedStylePacks.REMOTE_ORIGINAL_ROUTE.equals(route) || SharedStylePacks.REMOTE_PREVIEW_ROUTE.equals(route);
+            if (localStyle || remoteStyle) {
+                boolean thumbnail = SharedStylePacks.PREVIEW_ROUTE.equals(route) || SharedStylePacks.REMOTE_PREVIEW_ROUTE.equals(route);
+                byte[] bytes = sharedStyles.photo(parts.get(1), parts.get(2), thumbnail, remoteStyle);
+                return response(NaxLibrary.imageType(bytes), new ByteArrayInputStream(bytes), false);
+            }
         }
         if ((count == 3 || count == 4) && "korean-image".equals(parts.get(0))) {
             KoreanLibrary pack = count == 3 ? korean : koreanPack(parts.get(1));
@@ -302,9 +307,10 @@ public final class MainActivity extends Activity {
                     });
                     return;
                 case "openSharedStylePack":
+                case "openRemoteSharedStylePack":
                     files.execute(() -> {
                         try {
-                            JSONObject catalog = sharedStyles.open();
+                            JSONObject catalog = "openRemoteSharedStylePack".equals(action) ? sharedStyles.openRemote() : sharedStyles.open();
                             runOnUiThread(() -> send(id, catalog, null));
                         } catch (Exception failure) {
                             runOnUiThread(() -> send(id, null, sharedStyleError(failure)));
@@ -330,11 +336,12 @@ public final class MainActivity extends Activity {
                     return;
                 case "saveOnlinePhotos":
                 case "saveSharedStylePhotos":
+                case "saveRemoteSharedStylePhotos":
                     if (fileOperationBusy()) {
                         send(id, null, "正在读取其他图片或文件，请稍后再试。");
                         return;
                     }
-                    prepareOnlineExport(id, value, "saveSharedStylePhotos".equals(action));
+                    prepareOnlineExport(id, value, action);
                     return;
                 case "photoMetadata":
                     if (fileOperationBusy()) {
@@ -453,12 +460,12 @@ public final class MainActivity extends Activity {
         return picker != 0 || remotePackImport || galleryOperation || backup.isBusy() || imagePrompts.isBusy();
     }
 
-    private void prepareOnlineExport(int id, String selection, boolean sharedStyle) {
+    private void prepareOnlineExport(int id, String selection, String action) {
         galleryOperation = true;
         files.execute(() -> {
             try {
-                OnlinePacks.Export export = sharedStyle ? sharedStyles.prepareExport(selection, getCacheDir())
-                        : onlinePacks.prepareExport(selection, getCacheDir());
+                OnlinePacks.Export export = "saveOnlinePhotos".equals(action) ? onlinePacks.prepareExport(selection, getCacheDir())
+                        : sharedStyles.prepareExport(selection, getCacheDir(), "saveRemoteSharedStylePhotos".equals(action));
                 runOnUiThread(() -> {
                     galleryOperation = false;
                     if (web == null || isFinishing()) {
