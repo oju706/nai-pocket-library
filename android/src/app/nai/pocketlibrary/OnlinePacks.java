@@ -38,7 +38,10 @@ final class OnlinePacks {
     private static final String EXPORT_PREFIX = "pocket-online-export-";
     private static final String IMAGE_ROUTE = "/online-pack-image/";
     private static final String THUMB_ROUTE = "/online-pack-thumb/";
+    private final PackPhotoCache cache;
     private volatile Catalog current;
+
+    OnlinePacks(PackPhotoCache cache) { this.cache = cache; }
 
     JSONObject open(String address) throws IOException, JSONException {
         URI url = indexUri(address);
@@ -161,12 +164,19 @@ final class OnlinePacks {
         return catalog;
     }
 
-    private static byte[] original(Catalog catalog, Image image) throws IOException {
+    private byte[] original(Catalog catalog, Image image) throws IOException {
+        byte[] cached = cache.get(image.digest, image.bytes);
+        if (cached != null && matchesDigest(cached, image.digest) && supportedImage(cached)) return cached;
         byte[] bytes = fetch(catalog.base.resolve(image.original), image.bytes);
-        if (bytes.length != image.bytes || !hex(sha256().digest(bytes)).equals(image.digest) || !supportedImage(bytes)) {
+        if (bytes.length != image.bytes || !matchesDigest(bytes, image.digest) || !supportedImage(bytes)) {
             throw new IOException("原图与目录校验不一致，请检查资源更新。");
         }
+        cache.put(image.digest, bytes);
         return bytes;
+    }
+
+    static boolean matchesDigest(byte[] data, String digest) {
+        return hex(sha256().digest(data)).equals(digest);
     }
 
     static URI indexUri(String address) throws IOException {

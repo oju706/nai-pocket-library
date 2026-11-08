@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.ImageDecoder;
@@ -27,6 +28,7 @@ import org.json.JSONObject;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -49,10 +51,14 @@ public final class MainActivity extends Activity {
     private static final int PICK_SHARED_STYLE = 35;
     private static final int GALLERY_BATCH_LIMIT = 40;
     private static final int COPY_LIMIT = 256 * 1024;
+    private static final String PACK_CACHE_LIMIT = "limit-mib";
+    private static final int DEFAULT_PACK_CACHE_LIMIT = 256;
     private static final int PAPER = Color.rgb(246, 244, 237);
     private final ExecutorService files = Executors.newSingleThreadExecutor();
     private final ExecutorService updateChecks = Executors.newSingleThreadExecutor();
-    private final OnlinePacks onlinePacks = new OnlinePacks();
+    private OnlinePacks onlinePacks;
+    private PackPhotoCache photoCache;
+    private SharedPreferences packCacheSettings;
     private int picker;
     private int pickerRequest;
     private boolean remotePackImport;
@@ -79,8 +85,15 @@ public final class MainActivity extends Activity {
         korean33000 = new KoreanLibrary(this, "33000");
         korean55000 = new KoreanLibrary(this, "55000");
         packs = new LocalPacks(this);
-        sharedStyles = new SharedStylePacks(this);
-        files.execute(() -> OnlinePacks.clearExpiredExports(getCacheDir()));
+        packCacheSettings = getSharedPreferences("online-pack-cache", MODE_PRIVATE);
+        photoCache = new PackPhotoCache(new File(getCacheDir(), "online-pack-images"),
+                packCacheSettings.getInt(PACK_CACHE_LIMIT, DEFAULT_PACK_CACHE_LIMIT));
+        onlinePacks = new OnlinePacks(photoCache);
+        sharedStyles = new SharedStylePacks(this, photoCache);
+        files.execute(() -> {
+            OnlinePacks.clearExpiredExports(getCacheDir());
+            photoCache.bytes();
+        });
         updates = new AppUpdates(this);
         installer = new AppUpdateInstaller(this);
         backup = new LibraryBackup(this, this::send);
@@ -306,6 +319,11 @@ public final class MainActivity extends Activity {
                         }
                     });
                     return;
+                case "packCacheInfo":
+                case "setPackCacheLimit":
+                case "clearPackCache":
+                    files.execute(() -> packCacheAction(id, action, value));
+                    return;
                 case "openSharedStylePack":
                 case "openRemoteSharedStylePack":
                     files.execute(() -> {
@@ -458,6 +476,26 @@ public final class MainActivity extends Activity {
 
     private boolean fileOperationBusy() {
         return picker != 0 || remotePackImport || galleryOperation || backup.isBusy() || imagePrompts.isBusy();
+    }
+
+    private void packCacheAction(int id, String action, String value) {
+        try {
+            int limit = packCacheSettings.getInt(PACK_CACHE_LIMIT, DEFAULT_PACK_CACHE_LIMIT);
+            if ("setPackCacheLimit".equals(action)) {
+                if (!Arrays.asList("0", "128", "256", "512", "1024").contains(value)) {
+                    throw new IllegalArgumentException("缓存上限选项无效。");
+                }
+                limit = Integer.parseInt(value);
+                if (!packCacheSettings.edit().putInt(PACK_CACHE_LIMIT, limit).commit()) throw new IOException("无法保存缓存设置。");
+                photoCache.setLimit(limit);
+            } else if ("clearPackCache".equals(action)) {
+                photoCache.clear();
+            }
+            JSONObject result = new JSONObject().put("limitMiB", limit).put("bytes", photoCache.bytes());
+            runOnUiThread(() -> send(id, result, null));
+        } catch (Exception failure) {
+            runOnUiThread(() -> send(id, null, "无法更新在线图包缓存，请重试。"));
+        }
     }
 
     private void prepareOnlineExport(int id, String selection, String action) {

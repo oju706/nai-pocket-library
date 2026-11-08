@@ -36,12 +36,14 @@ final class SharedStylePacks {
     private static final String SOURCE_PREFIX = "https://arca.live/b/aiart/";
     private final ContentResolver resolver;
     private final SharedPreferences saved;
+    private final PackPhotoCache cache;
     private volatile Catalog current;
     private volatile Catalog remote;
 
-    SharedStylePacks(Context context) {
+    SharedStylePacks(Context context, PackPhotoCache cache) {
         resolver = context.getContentResolver();
         saved = context.getSharedPreferences("shared-style-pack", Context.MODE_PRIVATE);
+        this.cache = cache;
     }
 
     JSONObject open() throws IOException, JSONException {
@@ -111,6 +113,9 @@ final class SharedStylePacks {
     private Catalog readCatalog(Uri uri, SharedStyleRemote online, SharedStyleZip.Source source) throws IOException, JSONException {
         SharedStyleZip archive = SharedStyleZip.open(source);
         SharedStyleZip.Entry manifest = archive.get("manifest.json");
+        if (manifest == null && online == null && archive.get("batch.json") != null) {
+            return readTestCatalog(uri, archive, source);
+        }
         if (manifest == null) throw new IOException("ZIP 中没有社区画风图包目录。");
         byte[] raw = archive.read(source, manifest, MAX_INDEX);
         String digest = OnlinePacks.hex(OnlinePacks.sha256().digest(raw));
@@ -152,8 +157,41 @@ final class SharedStylePacks {
         return new Catalog(uri, online, archive, revision, photos, index);
     }
 
+    private Catalog readTestCatalog(Uri uri, SharedStyleZip archive, SharedStyleZip.Source source) throws IOException, JSONException {
+        SharedStyleTestCatalog test = SharedStyleTestCatalog.read(archive, source);
+        Map<String, Photo> photos = new LinkedHashMap<>();
+        JSONArray images = new JSONArray();
+        for (SharedStyleTestCatalog.Item item : test.items) {
+            photos.put(item.id, new Photo(item.original, item.thumbnail, item.mime));
+            String postId = item.source.isEmpty() ? "" : item.source.substring(SOURCE_PREFIX.length());
+            String path = "/" + test.revision + "/" + item.id;
+            images.put(new JSONObject().put("id", item.id).put("title", item.title)
+                    .put("section", "artist").put("rating", "unknown").put("model", displayModel(item.model))
+                    .put("bytes", item.original.bytes).put("source", item.source).put("postId", postId)
+                    .put("thumbnail", "/" + PREVIEW_ROUTE + path).put("original", "/" + ORIGINAL_ROUTE + path));
+        }
+        JSONObject index = new JSONObject().put("title", test.title).put("revision", test.revision).put("images", images);
+        return new Catalog(uri, null, archive, test.revision, photos, index);
+    }
+
+    private static String displayModel(String model) {
+        switch (model) {
+            case "nai-diffusion-5-full": return "V5 Full";
+            case "nai-diffusion-5-full-medium": return "V5 Full Medium";
+            case "nai-diffusion-4-5-full": return "V4.5 Full";
+            default: return model;
+        }
+    }
+
     byte[] photo(String revision, String id, boolean thumbnail, boolean online) throws IOException {
         Catalog catalog = catalog(revision, online);
+        Photo photo = catalog.photos.get(id);
+        if (thumbnail && photo != null && photo.thumbnail != null) {
+            try (ParcelFileDescriptor.AutoCloseInputStream input = openFile(catalog.uri)) {
+                byte[] preview = catalog.archive.read(input.getChannel(), photo.thumbnail, 512 * 1024);
+                if ("image/jpeg".equals(NaxLibrary.imageType(preview))) return preview;
+            }
+        }
         byte[] bytes = original(catalog, id);
         if (!thumbnail) return bytes;
         Bitmap image = ImageDecoder.decodeBitmap(ImageDecoder.createSource(ByteBuffer.wrap(bytes)), (decoder, info, source) -> {
@@ -183,7 +221,14 @@ final class SharedStylePacks {
     private byte[] original(Catalog catalog, String id) throws IOException {
         Photo photo = catalog.photos.get(id);
         if (photo == null) throw new IOException("这张图片不在已选图包中。");
-        if (catalog.remote != null) return original(catalog, photo, catalog.remote);
+        if (catalog.remote != null) {
+            byte[] cached = cache.get(photo.sha, photo.entry.bytes);
+            if (cached != null && "image/webp".equals(NaxLibrary.imageType(cached))
+                    && OnlinePacks.matchesDigest(cached, photo.sha)) return cached;
+            byte[] data = original(catalog, photo, catalog.remote);
+            cache.put(photo.sha, data);
+            return data;
+        }
         try (ParcelFileDescriptor.AutoCloseInputStream input = openFile(catalog.uri)) {
             return original(catalog, photo, SharedStyleZip.channel(input.getChannel()));
         }
@@ -191,8 +236,8 @@ final class SharedStylePacks {
 
     private byte[] original(Catalog catalog, Photo photo, SharedStyleZip.Source source) throws IOException {
         byte[] bytes = catalog.archive.read(source, photo.entry, MAX_IMAGE);
-        if (!"image/webp".equals(NaxLibrary.imageType(bytes))
-                || !photo.sha.equals(OnlinePacks.hex(OnlinePacks.sha256().digest(bytes)))) {
+        if (!photo.mime.equals(NaxLibrary.imageType(bytes))
+                || (photo.sha != null && !OnlinePacks.matchesDigest(bytes, photo.sha))) {
             throw new IOException("图片与图包目录不符，请重新检查图包。");
         }
         return bytes;
@@ -238,7 +283,22 @@ final class SharedStylePacks {
 
     private static final class Photo {
         final SharedStyleZip.Entry entry;
+        final SharedStyleZip.Entry thumbnail;
         final String sha;
-        Photo(SharedStyleZip.Entry entry, String sha) { this.entry = entry; this.sha = sha; }
+        final String mime;
+
+        Photo(SharedStyleZip.Entry entry, String sha) {
+            this.entry = entry;
+            this.thumbnail = null;
+            this.sha = sha;
+            this.mime = "image/webp";
+        }
+
+        Photo(SharedStyleZip.Entry entry, SharedStyleZip.Entry thumbnail, String mime) {
+            this.entry = entry;
+            this.thumbnail = thumbnail;
+            this.sha = null;
+            this.mime = mime;
+        }
     }
 }

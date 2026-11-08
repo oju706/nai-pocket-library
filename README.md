@@ -4,7 +4,12 @@
 
 中文安卓 App，用于浏览、收藏和复制 NovelAI 标签与画面提示词。安装 APK 后，手机桌面会出现「NAI 口袋词库」。适用 Android 9 或更新版本，使用系统提供的 Android WebView。
 
-## 1.3.5
+## 1.3.6
+
+- 社区画风图库默认按原帖分组，支持只看一帖、输入页码跳转，以及 2、3、4 列图墙。可分别展开或折叠单张图片，也可统一操作。返回上一张、翻页和切换列数会保留当前会话的展开状态。
+- 「最近浏览」可找回主动打开的社区图包图片，本机最多保留 100 条条目记录，支持按当前目录清除。图片仍按折叠状态按需读取。
+- 「设置与工具 → 在线图包缓存」可查看用量、清除缓存，或设置关闭及 128–1024 MB 上限。默认 256 MB，按 24 小时未访问和容量上限淘汰较旧缓存。手动下载的原图保存在选定位置。
+- 本地图包入口支持带 `batch.json` 的 NAImakeArtistGroup 画风测试 ZIP。使用包内预览显示每组画风，保留原图、模型和 Arca 原帖链接。
 
 - 「画师 → 在线资源 → 在线图包」默认从本项目仓库读取画师资源配置，直接打开原作者的 Arca Live 社区画风合集。图片按需从原站读取，支持检查图包更新、单张下载、多张保存为 ZIP，以及复制生成参数。也可打开「自定义图包」填写其他公开 GitHub 仓库。 [默认资源配置](resource-packs/artist.json) · [在线图包制作说明](docs/自制图包.md)
 - 「画师 → 在线资源 → 更多图包 → 打开社区画风图包」可直接选择 NAImakeArtistGroup 的共享画风 ZIP。应用记住原文件的位置，按张读取缩略图、原图和生成信息。移除图包会保留用户下载的 ZIP。
@@ -37,7 +42,7 @@
 
 ## 构建与发布
 
-当前版本为 1.3.5（versionCode 9），包名为 `app.nai.pocketlibrary`。构建使用 Windows 上的 PowerShell、JDK 17、Android SDK Platform 35 和 Build Tools 35.0.0。
+当前版本为 1.3.6（versionCode 10），包名为 `app.nai.pocketlibrary`。构建使用 Windows 上的 PowerShell、JDK 17、Android SDK Platform 35 和 Build Tools 35.0.0。
 
 脚本使用下面的便携工具目录。可用 `-ToolCache` 指定目录位置。
 

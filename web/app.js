@@ -413,7 +413,7 @@ function showPackSources() {
     const online = toolSection('在线浏览图包', '内置社区画风图包打开即用，也可以填写自己的 GitHub 资源仓库。');
     online.append(button('打开在线社区画风', 'primary', () => showRemoteSharedStylePack(showPackSources)),
       button('自定义 GitHub 仓库', 'soft', () => showOnlinePack(showPackSources)));
-    const shared = toolSection('韩国社区画风 ZIP', '直接读取手机里 NAImakeArtistGroup 的社区画风包。');
+    const shared = toolSection('韩国社区画风 ZIP', '直接读取手机里 NAImakeArtistGroup 的社区画风合集或画风测试包。');
     shared.append(button('打开社区画风图包', 'primary', () => showSharedStylePack(showPackSources)));
   }
   const sources = toolSection('从原作者下载', '在浏览器保存所选图包，再回到这里导入。作者的全量包较大，请按需要选择。');
@@ -1576,6 +1576,66 @@ function showTools(initialUpdate) {
   const backupActions = node('div', 'tool-actions');
   backupActions.append(button('导出备份', 'soft', exportBackup), button('从备份恢复', 'soft', importBackup));
   backup.append(backupActions);
+  if (window.Pocket) {
+    const cache = toolSection('在线图包缓存', '浏览过的在线图片存入临时缓存。超过 24 小时未使用或达到容量上限时，优先清理旧图。手动下载的原图保存在你选的位置。');
+    const cacheStatus = node('p', 'detail-note', '正在读取缓存信息…');
+    cacheStatus.setAttribute('aria-live', 'polite');
+    const cacheLimit = options([['0', '关闭（0 MB）'], ['128', '128 MB'], ['256', '256 MB（默认）'],
+      ['512', '512 MB'], ['1024', '1024 MB']], '256');
+    const cacheActions = node('div', 'tool-actions');
+    const cacheClear = button('清除缓存', 'soft', () => runCacheAction(
+      'clearPackCache', null, '在线图包缓存已清除'));
+    const cacheRevision = screenRevision;
+    let cacheInfo = null;
+    let cacheBusy = false;
+    const cacheMegabytes = (bytes) => number.format(
+      Math.round((Math.max(0, Number(bytes) || 0) / (1024 * 1024)) * 10) / 10);
+    const applyCacheInfo = (info) => {
+      if (!info || typeof info !== 'object') throw new Error('没有收到缓存信息。');
+      const limitMiB = Number(info.limitMiB);
+      const bytes = Number(info.bytes);
+      if (!Number.isFinite(limitMiB) || !Number.isFinite(bytes)) throw new Error('缓存信息格式不正确。');
+      cacheInfo = { limitMiB, bytes };
+      cacheLimit.value = String(limitMiB);
+      cacheStatus.textContent = `当前已用 ${cacheMegabytes(bytes)} MB / 上限 ${number.format(limitMiB)} MB`;
+    };
+    const runCacheAction = async (action, value, successMessage) => {
+      if (cacheBusy) return;
+      cacheBusy = true;
+      cacheLimit.disabled = cacheClear.disabled = true;
+      const revision = screenRevision;
+      try {
+        const info = await native(action, value);
+        if (revision !== screenRevision) return;
+        applyCacheInfo(info);
+        toast(successMessage);
+      } catch (error) {
+        if (revision !== screenRevision) return;
+        if (cacheInfo) cacheLimit.value = String(cacheInfo.limitMiB);
+        toast(error?.message || '在线图包缓存操作失败，请重试。');
+      } finally {
+        if (revision === screenRevision) {
+          cacheBusy = false;
+          cacheLimit.disabled = cacheClear.disabled = false;
+        }
+      }
+    };
+    cacheLimit.addEventListener('change', () => runCacheAction(
+      'setPackCacheLimit', cacheLimit.value, '在线图包缓存上限已更新'));
+    cacheActions.append(cacheClear);
+    cache.append(field('缓存上限', cacheLimit), cacheActions, cacheStatus);
+    cacheLimit.disabled = cacheClear.disabled = true;
+    native('packCacheInfo').then((info) => {
+      if (cacheRevision !== screenRevision) return;
+      applyCacheInfo(info);
+    }).catch((error) => {
+      if (cacheRevision !== screenRevision) return;
+      cacheStatus.textContent = '暂时无法读取缓存信息。';
+      toast(error?.message || '读取在线图包缓存信息失败。');
+    }).finally(() => {
+      if (cacheRevision === screenRevision) cacheLimit.disabled = cacheClear.disabled = false;
+    });
+  }
   const update = toolSection('应用版本更新', '打开 App 时自动检查并下载新版。下载后校验长度、签名和版本，由你在安卓系统中确认安装。');
   const version = node('p', 'detail-note', '正在读取版本…');
   const repo = textInput('input', '', 'owner/repo 或 GitHub 仓库链接', 300);

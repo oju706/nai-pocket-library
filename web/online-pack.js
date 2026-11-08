@@ -2,12 +2,15 @@
 
 (() => {
   const addressKey = 'pocket-online-pack-address';
+  const recentKey = 'pocket-online-pack-recent';
+  const recentLimit = 100;
   const pageSize = 24;
   const maxCount = 20;
   const maxBytes = 32 * 1024 * 1024;
   const sharedZipUrl = 'https://huggingface.co/datasets/okawaritsuika/nai-shared-styles/resolve/main/NAImakeArtistGroup_shared_images_20261024_webp.zip?download=true';
   const ratings = [['sfw', 'SFW'], ['nsfw', 'NSFW'], ['unknown', '未分级']];
   const sections = { artist: '画师', character: '同人角色', knowledge: '画面提示词知识' };
+  let recentRecords = null;
 
   function sizeText(bytes) {
     if (bytes < 1024) return `${bytes} B`;
@@ -17,14 +20,13 @@
 
   function loadImage(frame, path, title, thumbnail, onError) {
     const status = node('span', 'online-pack-image-status', thumbnail ? '正在读取缩略图…' : '正在读取原图…');
-    const image = node('img', '');
+    const image = node('img', 'online-pack-image-pending');
     image.alt = title;
     image.decoding = 'async';
     if (thumbnail) image.loading = 'lazy';
-    image.hidden = true;
     image.addEventListener('load', () => {
       if (image.parentNode !== frame) return;
-      image.hidden = false;
+      image.className = '';
       status.remove();
     });
     image.addEventListener('error', () => {
@@ -35,6 +37,52 @@
     frame.replaceChildren(status, image);
     image.src = path;
     return image;
+  }
+
+  function groupByPost(images) {
+    const groups = new Map();
+    for (const item of images) {
+      const id = String(item.postId ?? '');
+      if (!groups.has(id)) groups.set(id, []);
+      groups.get(id).push(item);
+    }
+    return groups;
+  }
+
+  function pageJump(current, pages, move) {
+    const form = node('form', 'online-pack-page-jump');
+    const input = node('input');
+    input.type = 'text';
+    input.inputMode = 'numeric';
+    input.enterKeyHint = 'go';
+    input.maxLength = 12;
+    input.value = String(current + 1);
+    input.setAttribute('aria-label', `跳转页码，1 到 ${pages}`);
+    input.setAttribute('aria-describedby', 'online-pack-page-error');
+    const jump = node('button', 'soft compact', '跳转');
+    jump.type = 'submit';
+    const error = node('p', 'online-pack-note online-pack-page-error');
+    error.id = 'online-pack-page-error';
+    error.setAttribute('role', 'status');
+    error.hidden = true;
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const value = input.value.normalize('NFKC').trim();
+      const target = Number(value);
+      if (!/^\d+$/.test(value) || target < 1 || target > pages) {
+        input.setAttribute('aria-invalid', 'true');
+        error.textContent = `请输入 1–${pages} 的页码。`;
+        error.hidden = false;
+        input.focus();
+        return;
+      }
+      input.removeAttribute('aria-invalid');
+      error.hidden = true;
+      input.value = String(target);
+      move(target - 1);
+    });
+    form.append(node('span', 'online-pack-note', `${current + 1} / ${pages} 页`), input, jump, error);
+    return form;
   }
 
   function showPack(back, mode) {
@@ -52,11 +100,92 @@
     let showRestricted = false;
     let searchTerm = '';
     let page = 0;
+    let byPost = shared;
+    let postView = null;
+    let recentView = false;
+    let recentOrigin = null;
+    let columns = 2;
+    let listScroll = 0;
     let openedShared = false;
     let saving = false;
     let updateSave = () => {};
     const selected = new Map();
+    const photoVisibility = new Map();
+    const recentPhotoVisibility = new Map();
+    const originalDetails = new Set();
+    let recentShowRestricted = false;
+    if (recentRecords === null) recentRecords = readRecentRecords();
     const selectionBytes = () => [...selected.values()].reduce((sum, item) => sum + item.bytes, 0);
+    const itemsPerPage = () => shared ? columns * 12 : pageSize;
+
+    function readRecentRecords() {
+      try {
+        const saved = JSON.parse(localStorage.getItem(recentKey) || '[]');
+        if (!Array.isArray(saved)) return [];
+        const seen = new Set();
+        return saved
+          .map(record => ({
+            mode: record?.mode,
+            revision: record?.revision,
+            imageId: String(record?.imageId ?? ''),
+            viewedAt: Number(record?.viewedAt),
+          }))
+          .filter(record => (record.mode === 'remote' || record.mode === 'local') &&
+            (typeof record.revision === 'string' || typeof record.revision === 'number') &&
+            record.imageId && Number.isFinite(record.viewedAt))
+          .sort((left, right) => right.viewedAt - left.viewedAt)
+          .filter(record => {
+            const key = `${record.mode}\n${record.revision}\n${record.imageId}`;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          })
+          .slice(0, recentLimit);
+      } catch {
+        return [];
+      }
+    }
+
+    function saveRecentRecords() {
+      try {
+        localStorage.setItem(recentKey, JSON.stringify(recentRecords));
+      } catch { /* Recent browsing remains available for this session. */ }
+    }
+
+    function currentRecentRecords() {
+      const revision = String(catalog?.revision ?? '');
+      return recentRecords.filter(record => record.mode === mode && String(record.revision) === revision);
+    }
+
+    function recordRecent(item) {
+      if (!shared || !catalog) return;
+      const imageId = String(item.id);
+      const revision = catalog.revision;
+      recentRecords = [
+        { mode, revision, imageId, viewedAt: Date.now() },
+        ...recentRecords.filter(record => record.mode !== mode ||
+          String(record.revision) !== String(revision) || record.imageId !== imageId),
+      ].slice(0, recentLimit);
+      saveRecentRecords();
+    }
+
+    function isExpanded(item) {
+      if (!shared) return true;
+      return recentView
+        ? (recentPhotoVisibility.get(item.id) ?? recentShowRestricted)
+        : (photoVisibility.get(item.id) ?? showRestricted);
+    }
+
+    function setExpanded(item, expanded) {
+      if (recentView) {
+        if (expanded === recentShowRestricted) recentPhotoVisibility.delete(item.id);
+        else recentPhotoVisibility.set(item.id, expanded);
+      } else if (expanded === showRestricted) {
+        photoVisibility.delete(item.id);
+      } else {
+        photoVisibility.set(item.id, expanded);
+      }
+    }
 
     function replaceCatalog(next) {
       if (next !== null && (!next?.revision || !Array.isArray(next.images))) throw new Error('图包目录格式不正确。');
@@ -64,12 +193,32 @@
       catalog = next;
       if (changed) {
         selected.clear();
+        photoVisibility.clear();
+        recentPhotoVisibility.clear();
+        originalDetails.clear();
         rating = 'sfw';
         showRestricted = false;
+        recentShowRestricted = false;
         searchTerm = '';
         page = 0;
+        postView = null;
+        recentView = false;
+        recentOrigin = null;
+        listScroll = 0;
       }
       return changed;
+    }
+
+    function returnFromRecent() {
+      const origin = recentOrigin;
+      recentOrigin = null;
+      recentView = false;
+      if (!origin) return;
+      byPost = origin.byPost;
+      postView = origin.postView;
+      searchTerm = origin.searchTerm;
+      page = Math.floor(origin.anchor / itemsPerPage());
+      listScroll = origin.scroll;
     }
 
     function bindSaveState(update) {
@@ -97,14 +246,24 @@
       }
     }
 
-    function showDetail(item) {
+    function showDetail(ordered, index) {
+      const item = ordered[index];
+      if (shared && isExpanded(item)) recordRecent(item);
       openScreen(`${packLabel} · 图片详情`, showList);
       const screen = screenRevision;
       const title = item.title || item.id;
       const frame = node('div', 'online-pack-detail-image');
       const facts = [item.model, sections[item.section], item.source, sizeText(item.bytes)].filter(Boolean);
       const view = node('section', 'online-pack-detail');
-      const original = button('查看完整原图', 'soft', () => showImage(!showOriginal));
+      const original = button('查看完整原图', 'soft', () => {
+        if (!isExpanded(item)) {
+          setExpanded(item, true);
+          recordRecent(item);
+          showImage(showOriginal);
+        } else {
+          showImage(!showOriginal);
+        }
+      });
       const saveLabel = local ? '保存原图' : '下载原图';
       const save = button(saveLabel, 'soft', () => savePhotos([item.id]));
       const metadata = button('查看提示词与参数', 'primary', async () => {
@@ -115,10 +274,10 @@
           if (screen !== screenRevision) return;
           if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('没有收到图片的读取结果。');
           showPromptImport(data, {
-            back: () => showDetail(item),
+            back: () => showDetail(ordered, index),
             resourcePhoto: {
               title, label: packLabel, source: item.source || catalog.title,
-              preview: image.hidden ? null : image,
+              preview: image && image.className !== 'online-pack-image-pending' ? image : null,
             },
           });
         } catch (error) {
@@ -128,10 +287,20 @@
           metadata.textContent = '查看提示词与参数';
         }
       });
-      let showOriginal = false;
-      let image;
+      let showOriginal = originalDetails.has(item.id);
+      let image = null;
       function showImage(full) {
         showOriginal = full;
+        if (shared) {
+          if (full) originalDetails.add(item.id);
+          else originalDetails.delete(item.id);
+        }
+        if (!isExpanded(item)) {
+          image = null;
+          original.textContent = '展开这张图';
+          frame.replaceChildren(node('span', 'online-pack-image-status', '已折叠'));
+          return;
+        }
         original.textContent = full ? '返回缩略图' : '查看完整原图';
         image = loadImage(frame, full ? item.original : item.thumbnail, title, !full, full ? () => {
           if (screen !== screenRevision) return;
@@ -140,11 +309,20 @@
         } : null);
       }
       view.append(node('h2', '', title), node('p', 'online-pack-note', facts.join(' · ')), frame, original);
+      if (shared && ordered.length > 1) {
+        const nav = node('div', 'online-pack-pagination');
+        const previous = button('上一张', 'soft', () => showDetail(ordered, index - 1));
+        const next = button('下一张', 'soft', () => showDetail(ordered, index + 1));
+        previous.disabled = index === 0;
+        next.disabled = index === ordered.length - 1;
+        nav.append(previous, node('span', 'online-pack-note', `${index + 1} / ${ordered.length} 张`), next);
+        view.append(nav);
+      }
       if (shared && /^https:\/\/arca\.live\/b\/aiart\/\d+$/.test(item.source)) {
         view.append(button('在浏览器打开原帖', 'text-button', () => openLink(item.source)));
       }
       body.append(view);
-      showImage(false);
+      showImage(showOriginal);
       actions.append(save, metadata);
       bindSaveState(() => {
         save.disabled = saving;
@@ -152,12 +330,16 @@
       });
     }
 
-    function tile(item) {
+    function tile(item, ordered) {
       const title = item.title || item.id;
       const card = node('article', 'online-pack-tile');
-      const open = button('', 'online-pack-open-photo', () => showDetail(item));
-      open.setAttribute('aria-label', `查看 ${title}`);
       const frame = node('span', 'online-pack-thumbnail');
+      const open = button('', 'online-pack-open-photo', () => {
+        if (!isExpanded(item)) { toggleImage(); return; }
+        if (shared) listScroll = body.scrollTop;
+        showDetail(ordered, ordered.indexOf(item));
+      });
+      const toggle = shared ? button('', 'text-button online-pack-tile-toggle', toggleImage) : null;
       const label = node('label', 'online-pack-select');
       const checkbox = node('input');
       checkbox.type = 'checkbox';
@@ -180,8 +362,33 @@
       caption.append(node('strong', '', title), node('span', 'online-pack-note', [item.model, sections[item.section]].filter(Boolean).join(' · ')));
       open.append(frame, caption);
       label.append(checkbox, node('span', '', '选择'));
-      card.append(open, label);
-      loadImage(frame, item.thumbnail, title, true);
+      if (toggle) {
+        const controls = node('div', 'online-pack-tile-controls');
+        controls.append(label, toggle);
+        card.append(open, controls);
+      } else {
+        card.append(open, label);
+      }
+
+      function toggleImage() {
+        setExpanded(item, !isExpanded(item));
+        renderImage();
+      }
+
+      function renderImage() {
+        const visible = isExpanded(item);
+        open.setAttribute('aria-label', `${visible ? '查看' : '展开图片'} ${title}`);
+        if (toggle) {
+          const verb = visible ? '折叠' : '展开';
+          toggle.textContent = verb;
+          toggle.setAttribute('aria-label', `${verb} ${title}`);
+          toggle.setAttribute('aria-pressed', String(visible));
+        }
+        if (visible) loadImage(frame, item.thumbnail, title, true);
+        else frame.replaceChildren(node('span', 'online-pack-image-status', '已折叠'));
+      }
+
+      renderImage();
       return card;
     }
 
@@ -211,7 +418,7 @@
       search.maxLength = 160;
       search.value = searchTerm;
       const searchField = field('搜索原帖编号或标题', search);
-      const importZip = button('选择共享画风 ZIP', 'primary compact', () => loadShared('importSharedStylePack'));
+      const importZip = button('选择画风 ZIP', 'primary compact', () => loadShared('importSharedStylePack'));
       const forgetZip = button('移除图包', 'soft compact', () => {
         if (confirm('移除 App 中的共享图包？手机原 ZIP 文件会保留。')) return loadShared('forgetSharedStylePack');
       });
@@ -227,7 +434,7 @@
           tools.append(importZip, forgetZip);
         }
         tools.append(button('下载完整 ZIP', 'soft compact', () => openLink(catalog?.downloadUrl || sharedZipUrl)));
-        const description = remote ? '直接读取内置社区图包目录，图片按需加载。' : '在手机文件里选择共享画风 ZIP，直接浏览包内图片。';
+        const description = remote ? '直接读取内置社区图包目录，图片按需加载。' : '支持社区画风合集和画风测试 ZIP，按需浏览包内图片。';
         source.append(node('p', 'online-pack-note', description), tools, searchField, status);
       } else {
         source.open = !catalog;
@@ -250,7 +457,86 @@
         heading.append(node('h2', '', catalog.title));
         if (!local) heading.append(button('检查图包更新', 'soft compact', () => loadCatalog(address, true)));
         content.append(heading, node('p', 'online-pack-note', `目录共 ${catalog.images.length} 张，选图后可单张保存原图或多张保存为 ZIP。`));
-        if (!shared) {
+        if (shared) {
+          const grouping = node('div', 'segmented online-pack-filters');
+          grouping.setAttribute('aria-label', '图库分组');
+          for (const [grouped, label, recent] of [[false, '全部', false], [true, '按原帖', false], [false, '最近浏览', true]]) {
+            const option = button(label, '', () => {
+              if (recent) {
+                if (recentView) return;
+                recentOrigin = { byPost, postView, searchTerm, anchor: page * itemsPerPage(), scroll: body.scrollTop };
+                recentView = true;
+                postView = null;
+                searchTerm = '';
+                page = 0;
+                renderCatalog();
+                body.scrollTop = 0;
+                return;
+              }
+              if (recentView) {
+                returnFromRecent();
+                if (byPost === grouped) {
+                  renderCatalog();
+                  body.scrollTop = listScroll;
+                  return;
+                }
+              } else if (byPost === grouped && !postView) return;
+              if (postView) searchTerm = postView.search;
+              postView = null;
+              byPost = grouped;
+              page = 0;
+              renderCatalog();
+            });
+            option.setAttribute('aria-pressed', String(recentView === recent && (recent || byPost === grouped)));
+            grouping.append(option);
+          }
+          const controls = node('div', 'online-pack-view-controls');
+          function setAll(expand) {
+            if (recentView) {
+              if (recentShowRestricted === expand && !recentPhotoVisibility.size) return;
+              recentShowRestricted = expand;
+              recentPhotoVisibility.clear();
+            } else {
+              if (showRestricted === expand && !photoVisibility.size) return;
+              showRestricted = expand;
+              photoVisibility.clear();
+            }
+            renderCatalog();
+          }
+          controls.append(button('全部展开', 'soft compact', () => setAll(true)),
+            button('全部折叠', 'soft compact', () => setAll(false)));
+          for (const count of [2, 3, 4]) {
+            const option = button(`${count} 列`, 'chip', () => {
+              if (columns === count) return;
+              const anchor = page * itemsPerPage();
+              columns = count;
+              page = Math.floor(anchor / itemsPerPage());
+              renderCatalog();
+            });
+            option.setAttribute('aria-pressed', String(columns === count));
+            controls.append(option);
+          }
+          if (recentView) {
+            controls.append(
+              button('清除本图包记录', 'soft compact', () => {
+                if (!confirm('清除本图包的最近浏览记录？')) return;
+                const revision = String(catalog.revision);
+                recentRecords = recentRecords.filter(record => record.mode !== mode || String(record.revision) !== revision);
+                recentPhotoVisibility.clear();
+                recentShowRestricted = false;
+                page = 0;
+                saveRecentRecords();
+                renderCatalog();
+                toast('已清除本图包最近浏览');
+              }),
+              button('返回原图库', 'soft compact', () => {
+                returnFromRecent();
+                renderCatalog();
+                body.scrollTop = listScroll;
+              }));
+          }
+          content.append(grouping, node('p', 'online-pack-note', '这些图片未分级，可能含成人内容。可逐张展开，也可一键展开或折叠图库。'), controls);
+        } else {
           const filters = node('div', 'segmented online-pack-filters');
           for (const [value, label] of ratings) {
             const option = button(label, '', () => {
@@ -266,28 +552,80 @@
         }
         const view = node('div', 'online-pack-results');
         content.append(view);
+        if (postView) {
+          const context = node('div', 'online-pack-heading');
+          const title = postView.id ? `原帖 ${postView.id}` : '原帖未标注';
+          context.append(node('h3', '', title), button('返回全部帖子', 'soft compact', () => {
+            const previous = postView;
+            postView = null;
+            searchTerm = previous.search;
+            page = Math.floor(previous.anchor / itemsPerPage());
+            renderCatalog();
+            body.scrollTop = previous.scroll;
+          }));
+          view.append(context);
+        }
         const query = searchTerm.normalize('NFKC').trim().toLowerCase();
+        const imagesById = recentView ? new Map(catalog.images.map(item => [String(item.id), item])) : null;
+        const matchesQuery = item => !query || [item.title, item.id, item.postId, item.source]
+          .some(value => String(value ?? '').normalize('NFKC').toLowerCase().includes(query));
         const images = shared
-          ? catalog.images.filter(item => !query || [item.title, item.id, item.postId, item.source].some(value => String(value ?? '').normalize('NFKC').toLowerCase().includes(query)))
+          ? (recentView
+            ? currentRecentRecords().map(record => imagesById.get(record.imageId)).filter(item => item && matchesQuery(item))
+            : catalog.images.filter(item => (!postView || String(item.postId ?? '') === postView.id) && matchesQuery(item)))
           : catalog.images.filter(item => item.rating === rating);
         if (shared && query) view.append(node('p', 'online-pack-note', `找到 ${images.length} 张。`));
         if (!images.length) {
-          view.append(node('p', 'online-pack-note', shared ? '没有符合条件的图片。' : '这个分级暂时没有图片。'));
-        } else if ((shared || rating === 'nsfw') && !showRestricted) {
-          const note = shared ? '这些图片未分级，可能含成人内容。' : `有 ${images.length} 张标注为 NSFW 的图片。`;
-          view.append(node('p', 'online-pack-note', note),
-            button(shared ? '显示未分级图片' : '显示 NSFW 图片', 'soft', () => { showRestricted = true; renderCatalog(); }));
+          const message = recentView
+            ? (query ? '最近浏览中没有符合条件的图片。' : '这个图包还没有最近浏览记录。')
+            : (shared ? '没有符合条件的图片。' : '这个分级暂时没有图片。');
+          view.append(node('p', 'online-pack-note', message));
+        } else if (!shared && rating === 'nsfw' && !showRestricted) {
+          view.append(node('p', 'online-pack-note', `有 ${images.length} 张标注为 NSFW 的图片。`),
+            button('显示 NSFW 图片', 'soft', () => { showRestricted = true; renderCatalog(); }));
         } else {
-          if (shared) view.append(button('折叠未分级图片', 'soft compact', () => { showRestricted = false; renderCatalog(); }));
-          const grid = node('div', 'online-pack-grid');
-          grid.append(...images.slice(page * pageSize, (page + 1) * pageSize).map(tile));
-          view.append(grid);
-          const pages = Math.ceil(images.length / pageSize);
+          const groups = shared && byPost && !postView && !recentView ? groupByPost(images) : null;
+          const ordered = groups ? [...groups.values()].flat() : images;
+          const capacity = itemsPerPage();
+          const pageImages = ordered.slice(page * capacity, (page + 1) * capacity);
+          const pages = Math.ceil(ordered.length / capacity);
+          function move(target) {
+            if (target === page || target < 0 || target >= pages) return;
+            page = target;
+            listScroll = 0;
+            renderCatalog();
+            body.scrollTop = 0;
+          }
+          if (pages > 1) view.append(pageJump(page, pages, move));
+          function grid(items) {
+            const list = node('div', shared ? `online-pack-grid online-pack-columns-${columns}` : 'online-pack-grid');
+            list.append(...items.map(item => tile(item, ordered)));
+            return list;
+          }
+          if (groups) {
+            for (const [id, items] of groupByPost(pageImages)) {
+              const group = node('section', 'online-pack-post-group');
+              const title = id ? `原帖 ${id}` : '原帖未标注';
+              const heading = node('h3', '');
+              const openPost = button(`${title} · ${groups.get(id).length} 张`, 'text-button', () => {
+                postView = { id, anchor: page * capacity, search: searchTerm, scroll: body.scrollTop };
+                page = 0;
+                searchTerm = '';
+                renderCatalog();
+                body.scrollTop = 0;
+              });
+              openPost.setAttribute('aria-label', `只看${title}`);
+              heading.append(openPost);
+              group.append(heading, grid(items));
+              view.append(group);
+            }
+          } else {
+            view.append(grid(pageImages));
+          }
           if (pages > 1) {
             const nav = node('div', 'online-pack-pagination');
-            const move = (amount) => { page += amount; renderCatalog(); body.scrollTop = 0; };
-            const previous = button('上一页', 'soft', () => move(-1));
-            const next = button('下一页', 'soft', () => move(1));
+            const previous = button('上一页', 'soft', () => move(page - 1));
+            const next = button('下一页', 'soft', () => move(page + 1));
             previous.disabled = page === 0;
             next.disabled = page === pages - 1;
             nav.append(previous, node('span', 'online-pack-note', `${page + 1} / ${pages} 页`), next);
@@ -401,6 +739,7 @@
         renderCatalog();
       });
       renderCatalog();
+      if (shared) body.scrollTop = listScroll;
       if (remote && !catalog) loadCatalog();
       if (local && !openedShared) {
         openedShared = true;
