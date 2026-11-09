@@ -12,6 +12,17 @@
   const modelFamilies = ['V5', 'V4.5', 'V4', 'V3'];
   const sections = { artist: '画师', character: '同人角色', knowledge: '画面提示词知识' };
   let recentRecords = null;
+  const unmarkedDate = '__unmarked_date__';
+
+  function isoDate(value) {
+    if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return '';
+    const date = new Date(`${value}T00:00:00.000Z`);
+    return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value ? value : '';
+  }
+
+  function updatedDate(item, batchDate) {
+    return isoDate(item.addedOn) || batchDate;
+  }
 
   function sizeText(bytes) {
     if (bytes < 1024) return `${bytes} B`;
@@ -67,6 +78,7 @@
     let catalog = null;
     let modelLabels = new Map();
     let modelFilter = '';
+    let dateFilter = '';
     const defaultRating = presetMode && ['sfw', 'nsfw', 'unknown'].includes(preset.defaultRating)
       ? preset.defaultRating : 'sfw';
     let rating = defaultRating;
@@ -160,7 +172,7 @@
       }
     }
 
-    function replaceCatalog(next) {
+    function replaceCatalog(next, keepDate = false) {
       if (next !== null && (!next?.revision || !Array.isArray(next.images))) throw new Error('图包目录格式不正确。');
       const changed = catalog?.revision !== next?.revision;
       catalog = next;
@@ -175,6 +187,7 @@
         recentShowRestricted = false;
         searchTerm = '';
         modelFilter = '';
+        if (!keepDate) dateFilter = '';
         page = 0;
         postView = null;
         recentView = false;
@@ -193,6 +206,7 @@
       postView = origin.postView;
       searchTerm = origin.searchTerm;
       modelFilter = origin.modelFilter;
+      dateFilter = origin.dateFilter;
       page = Math.floor(origin.anchor / itemsPerPage());
       listScroll = origin.scroll;
     }
@@ -466,12 +480,39 @@
       const content = node('div', 'online-pack-content');
       body.append(source, progress, content);
 
+      function dateFilterField(batchDate) {
+        const counts = new Map();
+        let unmarked = 0;
+        for (const item of catalog.images) {
+          const value = updatedDate(item, batchDate);
+          if (value) counts.set(value, (counts.get(value) || 0) + 1);
+          else unmarked += 1;
+        }
+        const dates = [...counts.entries()].sort((left, right) => right[0].localeCompare(left[0]));
+        if (dateFilter !== unmarkedDate && !dates.some(([value]) => value === dateFilter)) dateFilter = '';
+        if (dateFilter === unmarkedDate && !unmarked) dateFilter = '';
+        const choices = [['', '全部日期'], ...dates.map(([value, count]) => [value, `${value} · ${count} 张`])];
+        if (unmarked) choices.push([unmarkedDate, `日期未标注 · ${unmarked} 张`]);
+        const select = options(choices, dateFilter);
+        select.className = 'online-pack-date-filter';
+        select.addEventListener('change', () => {
+          dateFilter = select.value;
+          page = 0;
+          if (postView) postView = { ...postView, anchor: 0, scroll: 0 };
+          renderCatalog();
+          body.scrollTop = 0;
+          content.querySelector('.online-pack-date-filter')?.focus({ preventScroll: true });
+        });
+        return field('按更新日期', select);
+      }
+
       function renderCatalog() {
         content.replaceChildren();
         actions.replaceChildren();
         searchField.hidden = forgetZip.hidden = !catalog;
         search.value = searchTerm;
         if (!catalog) return;
+        const batchDate = isoDate(catalog.batchDate);
         const heading = node('div', 'online-pack-heading');
         heading.append(node('h2', '', catalog.title));
         if (!local) heading.append(button('检查图包更新', 'soft compact', () => loadCatalog(address, true)));
@@ -483,7 +524,15 @@
             const option = button(label, '', () => {
               if (recent) {
                 if (recentView) return;
-                recentOrigin = { byPost, postView, searchTerm, modelFilter, anchor: page * itemsPerPage(), scroll: body.scrollTop };
+                recentOrigin = {
+                  byPost,
+                  postView,
+                  searchTerm,
+                  modelFilter,
+                  dateFilter,
+                  anchor: page * itemsPerPage(),
+                  scroll: body.scrollTop,
+                };
                 recentView = true;
                 postView = null;
                 searchTerm = '';
@@ -572,8 +621,9 @@
             body.scrollTop = 0;
             content.querySelector('select')?.focus({ preventScroll: true });
           });
-          content.append(grouping, field('按模型筛选', modelSelect),
-            node('p', 'online-pack-note', '这些图片未分级，可能含成人内容。可逐张展开，也可一键展开或折叠图库。'), controls);
+          content.append(grouping, field('按模型筛选', modelSelect));
+          if (remote) content.append(dateFilterField(batchDate));
+          content.append(node('p', 'online-pack-note', '这些图片未分级，可能含成人内容。可逐张展开，也可一键展开或折叠图库。'), controls);
         } else {
           const filters = node('div', 'segmented online-pack-filters');
           for (const [value, label] of ratings) {
@@ -586,7 +636,7 @@
             option.setAttribute('aria-pressed', String(rating === value));
             filters.append(option);
           }
-          content.append(filters);
+          content.append(filters, dateFilterField(batchDate));
         }
         const view = node('div', 'online-pack-results');
         content.append(view);
@@ -610,15 +660,16 @@
           const model = modelLabels.get(item.id);
           const matchesModel = !modelFilter || model === modelFilter ||
             (filterFamily && (model.startsWith(`${modelFilter} `) || model.startsWith(`${modelFilter}（`)));
-          return matchesModel && (!query || [item.title, item.id, item.postId, item.source]
+          const matchesDate = !dateFilter || (updatedDate(item, batchDate) || unmarkedDate) === dateFilter;
+          return matchesModel && matchesDate && (!query || [item.title, item.id, item.postId, item.source]
             .some(value => String(value ?? '').normalize('NFKC').toLowerCase().includes(query)));
         };
         const images = shared
           ? (recentView
             ? currentRecentRecords().map(record => imagesById.get(record.imageId)).filter(item => item && matches(item))
             : catalog.images.filter(item => (!postView || String(item.postId ?? '') === postView.id) && matches(item)))
-          : catalog.images.filter(item => item.rating === rating);
-        const filtered = query || modelFilter;
+          : catalog.images.filter(item => item.rating === rating && matches(item));
+        const filtered = query || modelFilter || dateFilter;
         if (shared && filtered) view.append(node('p', 'online-pack-note', `找到 ${images.length} 张。`));
         if (!images.length) {
           const message = recentView
@@ -733,7 +784,7 @@
           const result = remote ? await native('openRemoteSharedStylePack') : await native('openOnlinePack', url);
           if (screen !== screenRevision) return;
           if (!result) throw new Error('图包目录格式不正确。');
-          changed = replaceCatalog(result);
+          changed = replaceCatalog(result, checking);
           if (remote) {
             retry.hidden = true;
           } else if (customMode) {
@@ -744,7 +795,14 @@
             retry.hidden = true;
           }
           status.hidden = true;
-          if (checking) toast(changed ? '图包目录已更新' : '图包目录已是最新');
+          if (checking) {
+            const batchDate = isoDate(result.batchDate);
+            const latest = result.images.reduce((value, item) => {
+              const itemDate = updatedDate(item, batchDate);
+              return itemDate > value ? itemDate : value;
+            }, '');
+            toast(`${changed ? '图包目录已更新' : '图包目录已是最新'}${latest ? ` · 最新日期 ${latest}` : ''}`);
+          }
         } catch (error) {
           if (screen !== screenRevision) return;
           const message = error?.message || '图包目录读取失败，请重试。';

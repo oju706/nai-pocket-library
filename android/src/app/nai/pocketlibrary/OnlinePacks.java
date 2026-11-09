@@ -13,6 +13,10 @@ import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.time.format.ResolverStyle;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -109,15 +113,29 @@ final class OnlinePacks {
             if (!"character".equals(section) && !"knowledge".equals(section)) section = "artist";
             String rating = row.optString("rating");
             if (!"sfw".equals(rating) && !"nsfw".equals(rating)) rating = "unknown";
-            rows.put(new JSONObject().put("id", id).put("title", text(row, "title", id, 200))
+            String addedOn = normalizedDate(row.opt("addedOn"), DateTimeFormatter.ISO_LOCAL_DATE);
+            JSONObject output = new JSONObject().put("id", id).put("title", text(row, "title", id, 200))
                     .put("model", text(row, "model", "未标注", 40)).put("section", section).put("rating", rating)
                     .put("source", text(row, "source", title, 160)).put("bytes", image.bytes)
                     .put("thumbnail", THUMB_ROUTE + revision + "/" + id)
-                    .put("original", IMAGE_ROUTE + revision + "/" + id));
+                    .put("original", IMAGE_ROUTE + revision + "/" + id);
+            if (!addedOn.isEmpty()) output.put("addedOn", addedOn);
+            rows.put(output);
         }
         JSONObject result = new JSONObject().put("title", title).put("revision", revision).put("images", rows);
         current = catalog;
         return result;
+    }
+
+    static String normalizedDate(Object value, DateTimeFormatter formatter) {
+        if (!(value instanceof String)) return "";
+        String text = (String) value;
+        try {
+            LocalDate date = LocalDate.parse(text, formatter.withResolverStyle(ResolverStyle.STRICT));
+            return text.equals(formatter.format(date)) ? date.format(DateTimeFormatter.ISO_LOCAL_DATE) : "";
+        } catch (DateTimeParseException invalid) {
+            return "";
+        }
     }
 
     byte[] photo(String revision, String id, boolean thumbnail) throws IOException {

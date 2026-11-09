@@ -20,6 +20,7 @@ import java.io.InputStream;
 import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.time.format.DateTimeFormatter;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -70,16 +71,24 @@ final class SharedStylePacks {
                 || !"artist".equals(config.optString("section")) || !"shared-style-zip".equals(config.optString("kind"))) {
             throw new IOException("默认资源仓库中的图包设置无效。");
         }
+        String batchDate = OnlinePacks.normalizedDate(config.opt("release"), DateTimeFormatter.BASIC_ISO_DATE);
         SharedStyleRemote source = SharedStyleRemote.open(config.getString("source"), config.getLong("bytes"),
                 config.getString("manifestSha256"));
         Catalog previous = remote;
         if (previous != null && source.sourceUrl.equals(previous.remote.sourceUrl)
                 && source.size() == previous.remote.size() && source.manifestSha.equals(previous.remote.manifestSha)) {
+            setBatchDate(previous.index, batchDate);
             return previous.index;
         }
         Catalog next = readCatalog(null, source, source);
+        setBatchDate(next.index, batchDate);
         remote = next;
         return next.index;
+    }
+
+    private static void setBatchDate(JSONObject index, String batchDate) throws JSONException {
+        if (batchDate.isEmpty()) index.remove("batchDate");
+        else index.put("batchDate", batchDate);
     }
 
     JSONObject mount(Uri uri) throws IOException, JSONException {
