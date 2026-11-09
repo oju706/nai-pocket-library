@@ -1,0 +1,13 @@
+{
+  "format": "nai-pocket-gallery-index",
+  "version": 1,
+  "packs": [
+    {
+      "id": "korean-gallery",
+      "title": "韩国画风图库",
+      "section": "artist",
+      "address": "oju706/nai-pocket-library",
+      "defaultRating": "unknown"
+    }
+  ]
+}

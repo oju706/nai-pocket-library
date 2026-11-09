@@ -157,6 +157,11 @@ public final class MainActivity extends Activity {
             if ("/gallery.js".equals(path)) return response("text/javascript", getAssets().open("gallery.js"), false);
             if ("/online-pack.js".equals(path)) return response("text/javascript", getAssets().open("online-pack.js"), false);
             if ("/online-pack.css".equals(path)) return response("text/css", getAssets().open("online-pack.css"), false);
+            if ("/api/gallery-packs.json".equals(path)) {
+                byte[] index = onlinePacks.galleryIndex().toString()
+                        .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                return response("application/json", new ByteArrayInputStream(index), false);
+            }
             if ("/api/korean.json".equals(path)) return response("application/json", koreanPack(url.getQueryParameter("pack")).openIndex(), false);
             if ("/api/korean-status.json".equals(path)) {
                 byte[] status = koreanPack(url.getQueryParameter("pack")).status("1".equals(url.getQueryParameter("check")))

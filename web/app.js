@@ -16,11 +16,20 @@ const sections = {
   artist: { label: '画师', type: '画师标签', icon: 'artist', subtitle: '搜画师、看样图，收藏常用画风。' },
   knowledge: { label: '画面提示词知识', type: '提示词', icon: 'book', subtitle: '收好常用的动作、姿势和构图写法。' },
 };
+const galleryPacksStorageKey = 'pocket-gallery-packs-v1';
+const galleryPacksFallback = [{
+  id: 'korean-gallery',
+  title: '韩国画风图库',
+  section: 'artist',
+  address: 'oju706/nai-pocket-library',
+  defaultRating: 'unknown',
+}];
 const state = {
   section: 'artist', mode: 'online', model: 'V5', kind: 'all', knowledgeTab: 'basic', artistSource: 'korean',
   page: 0, online: null, onlineTask: null, onlineError: false, hasOnline: false,
   personal: [], personalError: false, packs: [], pack: null, packRows: [],
   packMessage: '', importing: false, importingRemote: false,
+  galleryPacks: readCachedGalleryPacks() || galleryPacksFallback,
   artistGroup: 'all', galleryFocus: false, galleryColumns: 3, artistShuffle: 0, artistOrder: 'name',
   artistPostBand: 'all', koreanPostBands: [],
   characterFilters: {},
@@ -360,6 +369,94 @@ function isRemote() {
 }
 
 function isKorean() { return state.mode === 'online' && state.section === 'artist' && state.artistSource === 'korean'; }
+
+function galleryPackAddress(value) {
+  const address = typeof value === 'string' ? value.trim() : '';
+  if (!address || address.length > 1024 || /[\s\u0000-\u001f\u007f]/.test(address)) return '';
+  const segment = '[A-Za-z0-9_.-]{1,128}';
+  if (new RegExp(`^[A-Za-z0-9_.-]{1,64}/${segment}$`).test(address)) return address;
+  if (new RegExp(`^https://github\\.com/[A-Za-z0-9_.-]{1,64}/${segment}/?$`).test(address)) return address;
+  if (new RegExp(`^https://raw\\.githubusercontent\\.com/(?:${segment}/){3,}online-pack\\.json$`).test(address)) return address;
+  return '';
+}
+
+function normalizeGalleryPacks(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+      || value.format !== 'nai-pocket-gallery-index' || value.version !== 1
+      || !Array.isArray(value.packs) || value.packs.length < 1 || value.packs.length > 32) {
+    throw new Error('图库入口清单格式不正确。');
+  }
+  const ids = new Set();
+  const packs = value.packs.map((pack) => {
+    if (!pack || typeof pack !== 'object' || Array.isArray(pack)) throw new Error('图库入口格式不正确。');
+    const id = typeof pack.id === 'string' ? pack.id.trim() : '';
+    const title = typeof pack.title === 'string' ? pack.title.trim() : '';
+    const section = pack.section;
+    const address = galleryPackAddress(pack.address);
+    const defaultRating = pack.defaultRating === undefined ? 'unknown' : pack.defaultRating;
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(id) || ids.has(id)
+        || !title || title.length > 120 || /[\u0000-\u001f\u007f]/.test(title)
+        || typeof section !== 'string' || !Object.prototype.hasOwnProperty.call(sections, section) || !address
+        || !['sfw', 'nsfw', 'unknown'].includes(defaultRating)) {
+      throw new Error('图库入口格式不正确。');
+    }
+    ids.add(id);
+    return { id, title, section, address, defaultRating };
+  });
+  return { format: 'nai-pocket-gallery-index', version: 1, packs };
+}
+
+function readCachedGalleryPacks() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(galleryPacksStorageKey) || 'null');
+    return normalizeGalleryPacks(saved).packs;
+  } catch {
+    return null;
+  }
+}
+
+let galleryPacksTask = null;
+function loadGalleryPacks() {
+  if (galleryPacksTask) return galleryPacksTask;
+  const previous = JSON.stringify(state.galleryPacks);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  galleryPacksTask = fetch('/api/gallery-packs.json', { cache: 'no-store', signal: controller.signal })
+    .then(async (response) => {
+      if (!response.ok) throw new Error('入口清单读取失败。');
+      const packs = normalizeGalleryPacks(await response.json()).packs;
+      const changed = JSON.stringify(packs) !== previous;
+      state.galleryPacks = packs;
+      try {
+        localStorage.setItem(galleryPacksStorageKey,
+          JSON.stringify({ format: 'nai-pocket-gallery-index', version: 1, packs }));
+      } catch { /* The built-in entry remains available. */ }
+      if (changed && state.mode === 'online') render();
+      return true;
+    })
+    .catch(() => false)
+    .finally(() => {
+      clearTimeout(timer);
+      galleryPacksTask = null;
+    });
+  return galleryPacksTask;
+}
+
+function appendGalleryPackEntries(target) {
+  if (state.mode !== 'online' || !target) return;
+  for (const pack of state.galleryPacks.filter((item) => item.section === state.section)) {
+    const entry = button(pack.title, 'text-button', () => {
+      if (typeof window.showPresetOnlinePack !== 'function') {
+        toast('远程图库组件尚未加载，请重新打开应用。');
+        return;
+      }
+      window.showPresetOnlinePack(pack);
+    });
+    entry.title = `${sections[pack.section].label} · 默认显示${pack.defaultRating === 'unknown' ? '未分级'
+      : pack.defaultRating.toUpperCase()}图片`;
+    target.append(entry);
+  }
+}
 
 function loadKoreanCatalog(id) {
   if (!koreanCatalogs.has(id)) {
@@ -718,6 +815,30 @@ function showPackSources() {
     const online = toolSection('在线浏览图包', '内置社区画风图包打开即用，也可以填写自己的 GitHub 资源仓库。');
     online.append(button('打开在线社区画风', 'primary', () => showRemoteSharedStylePack(showPackSources)),
       button('自定义 GitHub 仓库', 'soft', () => showOnlinePack(showPackSources)));
+    const remote = toolSection('远程图库入口', '入口由远程清单更新；打开后直接读取对应仓库的 online-pack.json。');
+    for (const pack of state.galleryPacks) {
+      const row = node('div', 'pack-source');
+      const label = node('div');
+      label.append(node('strong', '', pack.title), node('small', '', `${sections[pack.section].label} · ${pack.address}`));
+      row.append(label, button('打开', 'soft compact', () => window.showPresetOnlinePack(pack, showPackSources)));
+      remote.append(row);
+    }
+    const refresh = button('刷新入口清单', 'text-button', async () => {
+      const revision = screenRevision;
+      refresh.disabled = true;
+      refresh.textContent = '正在刷新…';
+      const updated = await loadGalleryPacks();
+      if (revision !== screenRevision) return;
+      if (updated) {
+        showPackSources();
+        toast('远程图库入口已刷新');
+      } else {
+        refresh.disabled = false;
+        refresh.textContent = '刷新入口清单';
+        toast('远程入口读取失败，继续使用本机入口');
+      }
+    });
+    remote.append(refresh);
     const shared = toolSection('韩国社区画风 ZIP', '直接读取手机里 NAImakeArtistGroup 的社区画风合集或画风测试包。');
     shared.append(button('打开社区画风图包', 'primary', () => showSharedStylePack(showPackSources)));
   }
@@ -1037,6 +1158,7 @@ function render() {
     filters.append(picker);
   }
   if (state.section === 'character') renderCharacterFilters(filters);
+  appendGalleryPackEntries(resourceTabs);
   const viewOptions = byId('view-options');
   viewOptions.replaceChildren(node('span', '', '显示'));
   for (const [value, label] of [['grid', '双列看图'], ['list', '图文列表'], ['compact', '紧凑文字']]) {
@@ -2638,6 +2760,7 @@ window.PocketForeground = checkAutomaticUpdate;
 
 ensureKorean();
 render();
+loadGalleryPacks();
 loadPersonal();
 loadPacks();
 checkForSavedDirectory();

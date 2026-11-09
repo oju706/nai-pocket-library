@@ -30,7 +30,11 @@ import javax.net.ssl.HttpsURLConnection;
 final class OnlinePacks {
     private static final String HOST = "raw.githubusercontent.com";
     private static final String INDEX = "online-pack.json";
+    private static final String GALLERY_INDEX =
+            "https://raw.githubusercontent.com/oju706/nai-pocket-library/main/resource-packs/galleries.json";
     private static final int MAX_INDEX = 1024 * 1024;
+    private static final int MAX_GALLERY_INDEX = 64 * 1024;
+    private static final int MAX_GALLERY_PACKS = 32;
     private static final int MAX_THUMB = 512 * 1024;
     private static final int MAX_IMAGE = 12 * 1024 * 1024;
     private static final int MAX_BATCH = 20;
@@ -42,6 +46,39 @@ final class OnlinePacks {
     private volatile Catalog current;
 
     OnlinePacks(PackPhotoCache cache) { this.cache = cache; }
+
+    JSONObject galleryIndex() throws IOException, JSONException {
+        URI url = URI.create(GALLERY_INDEX);
+        byte[] manifest = fetch(url, MAX_GALLERY_INDEX);
+        JSONObject input = new JSONObject(new String(manifest, StandardCharsets.UTF_8));
+        if (!"nai-pocket-gallery-index".equals(input.optString("format")) || input.optInt("version") != 1) {
+            throw new IOException("远程图库入口清单格式不正确。");
+        }
+        JSONArray packs = input.optJSONArray("packs");
+        if (packs == null || packs.length() < 1 || packs.length() > MAX_GALLERY_PACKS) {
+            throw new IOException("远程图库入口清单必须包含 1 至 32 个入口。");
+        }
+        JSONArray rows = new JSONArray();
+        Set<String> ids = new HashSet<>();
+        for (int i = 0; i < packs.length(); i++) {
+            JSONObject pack = packs.getJSONObject(i);
+            String id = pack.optString("id", "").trim();
+            String title = pack.optString("title", "").trim();
+            String section = pack.optString("section", "");
+            String address = pack.optString("address", "").trim();
+            String defaultRating = pack.optString("defaultRating", "unknown");
+            if (!id.matches("[A-Za-z0-9_-]{1,64}") || !ids.add(id)
+                    || title.isEmpty() || title.length() > 120 || unsafeText(title)
+                    || (!"artist".equals(section) && !"character".equals(section) && !"knowledge".equals(section))
+                    || (!"sfw".equals(defaultRating) && !"nsfw".equals(defaultRating) && !"unknown".equals(defaultRating))) {
+                throw new IOException("远程图库入口清单第 " + (i + 1) + " 项格式不正确。");
+            }
+            indexUri(address);
+            rows.put(new JSONObject().put("id", id).put("title", title).put("section", section)
+                    .put("address", address).put("defaultRating", defaultRating));
+        }
+        return new JSONObject().put("format", "nai-pocket-gallery-index").put("version", 1).put("packs", rows);
+    }
 
     JSONObject open(String address) throws IOException, JSONException {
         URI url = indexUri(address);
@@ -214,6 +251,11 @@ final class OnlinePacks {
 
     private static boolean safeSegment(String segment) {
         return segment.matches("[A-Za-z0-9_.-]{1,128}") && !".".equals(segment) && !"..".equals(segment);
+    }
+
+    private static boolean unsafeText(String value) {
+        for (int i = 0; i < value.length(); i++) if (Character.isISOControl(value.charAt(i))) return true;
+        return false;
     }
 
     private static boolean secureRaw(URI uri) {

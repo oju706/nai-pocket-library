@@ -4,6 +4,11 @@
 
 中文安卓 App，用于浏览、收藏和复制 NovelAI 标签与画面提示词。安装 APK 后，手机桌面会出现「NAI 口袋词库」。适用 Android 9 或更新版本，使用系统提供的 Android WebView。
 
+## 1.3.12
+
+- 「画师 → 在线资源 → 韩国画风图库」直接打开已收录的 129 张图片，默认显示「未分级」，并可在图库内检查更新。
+- 应用通过[在线图包入口清单](resource-packs/galleries.json)显示各分区的图包。新增公开图包仓库时可更新清单，无需重新发布 APK。
+
 ## 1.3.11
 
 - 从原图或样图读取生成的提示词页中，匹配到的画师样图可直接在对应画师行下展开、收起和切换多张图片，不再离开提示词与参数页。图片只在展开或切图时加载，展开状态及当前图片会在原始／实际提示词切换后保留。
@@ -55,7 +60,7 @@
 
 ## 构建与发布
 
-当前版本为 1.3.11（versionCode 15），包名为 `app.nai.pocketlibrary`。构建使用 Windows 上的 PowerShell、JDK 17、Android SDK Platform 35 和 Build Tools 35.0.0。
+当前版本为 1.3.12（versionCode 16），包名为 `app.nai.pocketlibrary`。构建使用 Windows 上的 PowerShell、JDK 17、Android SDK Platform 35 和 Build Tools 35.0.0。
 
 脚本使用下面的便携工具目录。可用 `-ToolCache` 指定目录位置。
 

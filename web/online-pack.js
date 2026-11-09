@@ -50,20 +50,26 @@
     return groups;
   }
 
-  function showPack(back, mode) {
+  function showPack(back, mode, preset = null) {
+    const presetMode = mode === 'preset';
+    const customMode = mode === 'custom';
     const remote = mode === 'remote';
     const local = mode === 'local';
     const shared = remote || local;
-    const packLabel = remote ? '在线社区画风' : local ? '共享画风图包' : '在线图包';
+    const packLabel = presetMode ? preset.title : remote ? '在线社区画风' : local ? '共享画风图包' : '在线图包';
     const saveAction = remote ? 'saveRemoteSharedStylePhotos' : local ? 'saveSharedStylePhotos' : 'saveOnlinePhotos';
     let address = '';
-    if (!shared) {
+    if (presetMode) {
+      address = preset.address;
+    } else if (!shared) {
       try { address = localStorage.getItem(addressKey) || ''; } catch { /* The address can still be entered. */ }
     }
     let catalog = null;
     let modelLabels = new Map();
     let modelFilter = '';
-    let rating = 'sfw';
+    const defaultRating = presetMode && ['sfw', 'nsfw', 'unknown'].includes(preset.defaultRating)
+      ? preset.defaultRating : 'sfw';
+    let rating = defaultRating;
     let showRestricted = false;
     let searchTerm = '';
     let page = 0;
@@ -164,7 +170,7 @@
         photoVisibility.clear();
         recentPhotoVisibility.clear();
         originalDetails.clear();
-        rating = 'sfw';
+        rating = defaultRating;
         showRestricted = false;
         recentShowRestricted = false;
         searchTerm = '';
@@ -410,7 +416,7 @@
         return;
       }
       const screen = screenRevision;
-      const source = node(shared ? 'section' : 'details', 'online-pack-source');
+      const source = node(shared || presetMode ? 'section' : 'details', 'online-pack-source');
       const form = node('form', 'online-pack-form');
       const input = node('input');
       input.value = address;
@@ -433,7 +439,7 @@
       const forgetZip = button('移除图包', 'soft compact', () => {
         if (confirm('移除 App 中的共享图包？手机原 ZIP 文件会保留。')) return loadShared('forgetSharedStylePack');
       });
-      const retry = button('重试读取在线图包', 'primary compact', () => loadCatalog());
+      const retry = button(`重试读取${presetMode ? packLabel : '在线图包'}`, 'primary compact', () => loadCatalog(address, true));
       retry.hidden = true;
       if (shared) {
         const tools = node('div', 'online-pack-heading');
@@ -447,6 +453,8 @@
         tools.append(button('下载完整 ZIP', 'soft compact', () => openLink(catalog?.downloadUrl || sharedZipUrl)));
         const description = remote ? '直接读取内置社区图包目录，图片按需加载。' : '支持社区画风合集和画风测试 ZIP，按需浏览包内图片。';
         source.append(node('p', 'online-pack-note', description), tools, searchField, status);
+      } else if (presetMode) {
+        source.append(node('p', 'online-pack-note', '这个远程图库入口会自动读取目录；图片按需加载，原图和提示词读取沿用在线图包缓存。'), status, retry);
       } else {
         source.open = !catalog;
         form.append(field('GitHub 仓库或 online-pack.json 链接', input), submit);
@@ -710,7 +718,7 @@
 
       async function loadCatalog(url, checking = false) {
         if (submit.disabled || saving) return;
-        const feedback = checking && !remote ? progress : status;
+        const feedback = presetMode ? status : checking && !remote ? progress : status;
         const scroll = body.scrollTop;
         let changed = false;
         feedback.hidden = false;
@@ -728,10 +736,12 @@
           changed = replaceCatalog(result);
           if (remote) {
             retry.hidden = true;
-          } else {
+          } else if (customMode) {
             input.value = address = url;
             try { localStorage.setItem(addressKey, address); } catch { /* Browsing does not require storage. */ }
             source.open = false;
+          } else {
+            retry.hidden = true;
           }
           status.hidden = true;
           if (checking) toast(changed ? '图包目录已更新' : '图包目录已是最新');
@@ -741,6 +751,11 @@
           if (remote) {
             retry.hidden = false;
             status.textContent = message;
+          } else if (presetMode) {
+            retry.hidden = false;
+            status.hidden = false;
+            status.textContent = message;
+            if (checking && catalog) toast(message);
           } else if (checking) toast(message);
           else {
             source.open = true;
@@ -769,7 +784,10 @@
       });
       renderCatalog();
       if (shared) body.scrollTop = listScroll;
-      if (remote && !catalog) loadCatalog();
+      if (!catalog) {
+        if (remote) loadCatalog();
+        if (presetMode) loadCatalog(address);
+      }
       if (local && !openedShared) {
         openedShared = true;
         loadShared('openSharedStylePack');
@@ -782,4 +800,19 @@
   window.showOnlinePack = (back = null) => showPack(back, 'custom');
   window.showSharedStylePack = (back = null) => showPack(back, 'local');
   window.showRemoteSharedStylePack = (back = null) => showPack(back, 'remote');
+  window.showPresetOnlinePack = (pack, back = null) => {
+    if (!pack || typeof pack !== 'object'
+        || typeof pack.id !== 'string' || typeof pack.title !== 'string'
+        || typeof pack.address !== 'string' || !pack.title.trim()) {
+      toast('远程图库入口格式不正确。');
+      return;
+    }
+    showPack(back, 'preset', {
+      id: pack.id,
+      title: pack.title.trim(),
+      section: pack.section,
+      address: pack.address.trim(),
+      defaultRating: pack.defaultRating,
+    });
+  };
 })();
