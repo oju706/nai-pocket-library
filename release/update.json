@@ -1,8 +1,8 @@
 {
-  "versionCode": 12,
-  "versionName": "1.3.8",
+  "versionCode": 15,
+  "versionName": "1.3.11",
   "file": "NAI-Pocket-Library.apk",
-  "bytes": 1099013,
-  "sha256": "1939f80cb1a07fc79748ee0f1b1b847fa7018725515b7cf9af5601113dda37a4",
-  "notes": "在线和本地社区图包支持按模型及 Full、精选等型号筛选，生成参数保留原始模型标识。"
+  "bytes": 1115397,
+  "sha256": "e39448a3bdcd3649c89bb085c70a1767aafd00177cb3789fd2919f84e59ac47f",
+  "notes": "修复画师样图展开后无法加载"
 }

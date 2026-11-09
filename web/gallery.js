@@ -154,25 +154,17 @@ async function galleryLoad(session, requestedPage, requestedScroll) {
   body.append(loading);
 
   try {
-    const listed = await native('listGallery');
+    const listed = await native('listGallery', String(requestedPage));
     if (session !== gallerySession || revision !== screenRevision) return;
-    if (!Array.isArray(listed)) throw new Error('图库数据格式不正确。');
-
-    const items = listed
-      .filter(item => item && item.id != null)
-      .slice()
-      .sort((left, right) => {
-        const timeDifference = galleryDateValue(right.createdAt) - galleryDateValue(left.createdAt);
-        return timeDifference || String(right.id).localeCompare(String(left.id));
-      });
+    if (!Array.isArray(listed?.items)) throw new Error('图库数据格式不正确。');
+    const { items, total, bytes, page, pages } = listed;
 
     body.replaceChildren();
-    const used = items.reduce((sum, item) => sum + (Number(item.bytes) || 0), 0);
     const heading = node('section', 'nai-gallery-heading');
     heading.append(
       node('p', 'nai-gallery-eyebrow', '仅保存在此设备'),
-      node('h2', '', `本地图库 · ${items.length} / 2,000 张`),
-      node('p', 'nai-gallery-note', `图片与生成信息占用 ${galleryFormatBytes(used)} / 1 GB`),
+      node('h2', '', `本地图库 · ${total} 张`),
+      node('p', 'nai-gallery-note', `图片与生成信息占用 ${galleryFormatBytes(bytes)}`),
       node('p', 'nai-gallery-note', '新导入的图片只保存小预览。已经读取并保存的生成信息可离线查看。'),
     );
     body.append(heading);
@@ -185,39 +177,23 @@ async function galleryLoad(session, requestedPage, requestedScroll) {
     }
 
     const grid = node('div', 'nai-gallery-grid');
-    const pageJumpHost = node('div');
-    const footer = node('div', 'nai-gallery-footer');
-    const pages = Math.ceil(items.length / galleryPageSize);
-    let page = Math.min(Math.max(requestedPage, 0), pages - 1);
     galleryPage = page;
     galleryScroll = page === requestedPage ? requestedScroll : 0;
-    body.append(pageJumpHost, grid, footer);
-
-    function renderPage() {
-      if (session !== gallerySession || revision !== screenRevision) return;
-      const start = page * galleryPageSize;
-      const end = Math.min(start + galleryPageSize, items.length);
-      grid.replaceChildren(...items.slice(start, end).map(item => galleryThumbnail(item, session)));
-      pageJumpHost.replaceChildren();
-      footer.replaceChildren();
-      if (pages > 1) {
-        function move(target) {
-          if (!Number.isInteger(target) || target < 0 || target >= pages || target === page) return;
-          page = target;
-          galleryPage = page;
-          galleryScroll = 0;
-          renderPage();
-          body.scrollTop = 0;
-        }
-        pageJumpHost.append(pageJump(page, pages, move));
-        footer.append(
-          node('span', 'nai-gallery-count', `第 ${start + 1}–${end} 张，共 ${items.length} 张`),
-          pageSteps(page, pages, move),
-        );
+    function move(target) {
+      if (session === gallerySession && revision === screenRevision && target !== page) {
+        galleryLoad(session, target, 0);
       }
     }
-
-    renderPage();
+    if (pages > 1) body.append(pageJump(page, pages, move));
+    grid.append(...items.map(item => galleryThumbnail(item, session)));
+    body.append(grid);
+    if (pages > 1) {
+      const start = page * galleryPageSize;
+      const footer = node('div', 'nai-gallery-footer');
+      footer.append(node('span', 'nai-gallery-count', `第 ${start + 1}–${start + items.length} 张，共 ${total} 张`),
+        pageSteps(page, pages, move));
+      body.append(footer);
+    }
     body.scrollTop = galleryScroll;
   } catch (error) {
     if (session !== gallerySession || revision !== screenRevision) return;
@@ -357,6 +333,7 @@ function showGalleryDetail(item) {
     if (!confirm(message)) return;
     remove.disabled = true;
     metadataButton.disabled = true;
+    exportButton.disabled = true;
     try {
       const deleted = await native('deleteGalleryImage', item.id);
       if (!active()) return;
@@ -367,14 +344,72 @@ function showGalleryDetail(item) {
       toast(error.message || '无法删除，请重试。');
       remove.disabled = false;
       metadataButton.disabled = false;
+      exportButton.disabled = false;
     }
   });
+
+  const exportOriginal = button('导出原图', 'soft', async () => {
+    if (!active()) return;
+    exportOriginal.disabled = exportButton.disabled = metadataButton.disabled = remove.disabled = true;
+    try {
+      const saved = await native('exportGalleryOriginal', item.id);
+      if (active() && saved === true) toast('已导出原图，可在文件应用分享');
+    } catch (error) {
+      if (active()) toast(error?.message || '原图已无法读取，仍可导出小预览和参数。');
+    } finally {
+      if (active()) {
+        exportOriginal.disabled = exportButton.disabled = metadataButton.disabled = remove.disabled = false;
+      }
+    }
+  });
+  const exportButton = button('导出图文', 'soft', async () => {
+    if (!active()) return;
+    exportButton.disabled = true;
+    exportOriginal.disabled = true;
+    metadataButton.disabled = true;
+    remove.disabled = true;
+    exportButton.textContent = '正在准备…';
+    let metadata = null;
+    try {
+      try {
+        metadata = await native('galleryMetadata', item.id);
+      } catch {
+        // A readable permanent preview can still be exported without generation info.
+      }
+      if (!active()) return;
+      if (metadata && metadata.promptCached !== true) {
+        throw new Error('生成信息读取成功，但未能永久保存到图库，请检查手机空间后重试。');
+      }
+      exportButton.textContent = '正在生成…';
+      const exported = await native('exportGalleryHtml', item.id);
+      if (!active()) return;
+      if (exported === true) {
+        toast(metadata ? '已导出离线图文' : '已导出小预览；生成信息缺失已注明');
+      } else {
+        toast('已取消导出');
+      }
+    } catch (error) {
+      if (!active()) return;
+      toast(error && error.message ? error.message : '导出图文失败，请重试。');
+    } finally {
+      if (active()) {
+        exportButton.disabled = false;
+        exportOriginal.disabled = false;
+        metadataButton.disabled = false;
+        remove.disabled = false;
+        exportButton.textContent = '导出图文';
+      }
+    }
+  });
+
   heading.append(remove);
   actions.replaceChildren(
     button('返回图库', 'soft', () => {
       if (active()) returnToGallery();
     }),
     metadataButton,
+    exportButton,
+    ...(item.kind === 'copy' || item.sourceLinked ? [exportOriginal] : []),
   );
 }
 

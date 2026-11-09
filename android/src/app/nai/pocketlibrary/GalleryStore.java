@@ -9,6 +9,7 @@ import android.graphics.BitmapFactory;
 import android.net.Uri;
 import android.provider.OpenableColumns;
 import android.util.AtomicFile;
+import android.util.JsonReader;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -21,6 +22,8 @@ import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
@@ -38,12 +41,10 @@ import java.util.Map;
  * their complete private copy. The source document is never modified or deleted.
  */
 final class GalleryStore {
-    private static final long MAX_BYTES = 1024L * 1024 * 1024;
-    private static final int MAX_ENTRIES = 2000;
-    private static final int MAX_INDEX = 2 * 1024 * 1024;
+    private static final int PAGE_SIZE = 24;
     private static final int MAX_PREVIEW_BYTES = 192 * 1024;
     private static final int MAX_PREVIEW_EDGE = 640;
-    private static final int MAX_PROMPT_BYTES = 256 * 1024;
+    private static final int MAX_PROMPT_BYTES = 16 * 1024 * 1024;
     private static final long MAX_PIXELS = 24_000_000L;
     private static final String PREVIEW_MIME = "image/jpeg";
     private static GalleryStore shared;
@@ -51,6 +52,8 @@ final class GalleryStore {
     private final AtomicFile index;
     private final ContentResolver resolver;
     private Map<String, JSONObject> records;
+    private List<Map.Entry<String, JSONObject>> listed;
+    private long listedBytes;
 
     static synchronized GalleryStore get(Context context) {
         if (shared == null) shared = new GalleryStore(context.getApplicationContext());
@@ -63,14 +66,25 @@ final class GalleryStore {
         resolver = context.getContentResolver();
     }
 
-    synchronized JSONArray list() throws IOException, JSONException {
-        List<JSONObject> result = new ArrayList<>();
-        for (Map.Entry<String, JSONObject> item : records().entrySet()) {
-            JSONObject row = item.getValue();
-            if (entryFile(item.getKey(), row) != null) result.add(publicRow(item.getKey(), row));
+    synchronized JSONObject list(int requestedPage) throws IOException, JSONException {
+        if (listed == null) {
+            listed = new ArrayList<>(records().entrySet());
+            listed.sort(Comparator.comparingLong((Map.Entry<String, JSONObject> item) -> item.getValue().optLong("createdAt"))
+                    .thenComparing(Map.Entry::getKey).reversed());
+            listedBytes = 0;
+            for (Map.Entry<String, JSONObject> item : listed) listedBytes += storageBytes(item.getKey());
         }
-        result.sort(Comparator.comparingLong((JSONObject entry) -> entry.optLong("createdAt")).reversed());
-        return new JSONArray(result);
+        int total = listed.size();
+        int pages = total == 0 ? 0 : (total - 1) / PAGE_SIZE + 1;
+        int page = Math.max(0, Math.min(requestedPage, pages - 1));
+        int start = page * PAGE_SIZE;
+        JSONArray items = new JSONArray();
+        for (int i = start; i < Math.min((long) start + PAGE_SIZE, total); i++) {
+            Map.Entry<String, JSONObject> item = listed.get(i);
+            items.put(publicRow(item.getKey(), item.getValue()));
+        }
+        return new JSONObject().put("items", items).put("total", total).put("bytes", listedBytes)
+                .put("page", page).put("pages", pages);
     }
 
     synchronized Entry entry(String id) throws IOException, JSONException {
@@ -130,10 +144,6 @@ final class GalleryStore {
         }
 
         byte[] preview = createPreview(() -> resolver.openInputStream(uri));
-        long stored = storedBytes(current);
-        if (current.size() >= MAX_ENTRIES || preview.length > MAX_BYTES - stored) {
-            throw new IOException("图库空间已满（1 GB 或 2,000 张）。");
-        }
 
         JSONObject metadata = new JSONObject()
                 .put("id", id)
@@ -166,6 +176,101 @@ final class GalleryStore {
         }
     }
 
+    synchronized JSONObject savePacked(File original, String requestedName, JSONObject sourceInfo,
+                                       JSONObject summary) throws IOException, JSONException {
+        if (original == null || !original.isFile()) throw new IOException("在线图包原图无法加载。");
+        if (original.length() < 1 || original.length() > ImagePrompts.MAX_INPUT) {
+            throw new IOException("在线图包原图大小异常，未保存到图库。");
+        }
+        Map<String, JSONObject> current = records();
+        if (!directory.isDirectory() && !directory.mkdirs()) throw new IOException("无法创建图库。");
+        if (directory.getUsableSpace() < 8L * 1024 * 1024) throw new IOException("手机剩余空间不足。");
+
+        MessageDigest digest = digest();
+        long sourceBytes = 0;
+        byte[] header = new byte[32];
+        try (InputStream input = new FileInputStream(original)) {
+            byte[] buffer = new byte[32768];
+            for (int read; (read = input.read(buffer)) >= 0;) {
+                if (Thread.currentThread().isInterrupted()) throw new IOException("保存已取消。");
+                if (read == 0) continue;
+                if (read > ImagePrompts.MAX_INPUT - sourceBytes) throw new IOException("在线图包原图超过 32 MB。");
+                if (sourceBytes < header.length) {
+                    System.arraycopy(buffer, 0, header, (int)sourceBytes,
+                            Math.min(read, header.length - (int)sourceBytes));
+                }
+                digest.update(buffer, 0, read);
+                sourceBytes += read;
+            }
+        }
+        String sourceMime = NaxLibrary.imageType(header);
+        if (!("image/png".equals(sourceMime) || "image/jpeg".equals(sourceMime) || "image/webp".equals(sourceMime))) {
+            throw new IOException("在线图包图片不是支持的 PNG、JPEG 或 WebP。");
+        }
+
+        String id = hex(digest.digest());
+        JSONObject existing = current.get(id);
+        if (existing != null && entryFile(id, existing) != null) {
+            boolean promptCached = false;
+            if (summary != null) {
+                try {
+                    promptCached = savePrompt(id, summary);
+                } catch (Exception ignored) {
+                    // The existing permanent preview remains usable when its text cache fills up.
+                }
+            }
+            return new JSONObject().put("id", id).put("added", false).put("promptCached", promptCached);
+        }
+
+        byte[] preview = createPreview(() -> new FileInputStream(original));
+
+        String name = cleanText(requestedName, "在线图包图片", 120);
+        JSONObject source = sourceInfo == null ? new JSONObject() : sourceInfo;
+        JSONObject row = new JSONObject()
+                .put("id", id)
+                .put("name", name)
+                .put("kind", "preview")
+                .put("format", formatName(sourceMime))
+                .put("sourceMime", sourceMime)
+                .put("previewType", PREVIEW_MIME)
+                .put("previewBytes", preview.length)
+                .put("originalBytes", sourceBytes)
+                .put("createdAt", System.currentTimeMillis())
+                .put("sourceType", "online-pack")
+                .put("sourceTitle", cleanText(source.optString("title"), "", 120))
+                .put("sourcePage", cleanText(source.optString("source"), "", 300))
+                .put("sourceRevision", cleanText(source.optString("revision"), "", 128))
+                .put("sourceImageId", cleanText(source.optString("imageId"), id, 128));
+        File previewFile = previewFile(id);
+        File temporary = File.createTempFile("preview-", ".part", directory);
+        try {
+            try (FileOutputStream output = new FileOutputStream(temporary)) {
+                output.write(preview);
+                output.getFD().sync();
+            }
+            Files.move(temporary.toPath(), previewFile.toPath(), StandardCopyOption.REPLACE_EXISTING,
+                    StandardCopyOption.ATOMIC_MOVE);
+            try {
+                putRow(current, id, row);
+            } catch (IOException | JSONException failure) {
+                previewFile.delete();
+                throw failure;
+            }
+        } finally {
+            if (temporary.exists()) temporary.delete();
+        }
+
+        boolean promptCached = false;
+        if (summary != null) {
+            try {
+                promptCached = savePrompt(id, summary);
+            } catch (Exception ignored) {
+                // Keep the permanent preview and report that the text cache was not saved.
+            }
+        }
+        return new JSONObject().put("id", id).put("added", true).put("promptCached", promptCached);
+    }
+
     synchronized JSONObject cachedPrompt(String id) throws IOException, JSONException {
         if (!validId(id)) throw new IOException("无效的图库条目。");
         JSONObject row = records().get(id);
@@ -180,6 +285,7 @@ final class GalleryStore {
             return summary;
         } catch (JSONException corrupt) {
             Files.deleteIfExists(file.toPath());
+            listed = null;
             return null;
         }
     }
@@ -199,7 +305,7 @@ final class GalleryStore {
         }
         byte[] bytes = exact.toString().getBytes(StandardCharsets.UTF_8);
         if (bytes.length == 0 || bytes.length > MAX_PROMPT_BYTES) return false;
-        if (bytes.length > MAX_BYTES - storedBytes(current)) return false;
+        if (bytes.length > directory.getUsableSpace()) return false;
 
         File temporary = File.createTempFile("prompt-", ".part", directory);
         try {
@@ -209,6 +315,7 @@ final class GalleryStore {
             }
             Files.move(temporary.toPath(), promptFile.toPath(), StandardCopyOption.REPLACE_EXISTING,
                     StandardCopyOption.ATOMIC_MOVE);
+            listed = null;
             return true;
         } finally {
             if (temporary.exists()) temporary.delete();
@@ -224,6 +331,7 @@ final class GalleryStore {
         Files.deleteIfExists(previewFile(id).toPath());
         Files.deleteIfExists(imageFile(id).toPath());
         current.remove(id);
+        listed = null;
         try {
             writeIndex(current);
         } catch (IOException ignored) {
@@ -242,6 +350,10 @@ final class GalleryStore {
             return createPreview(() -> new FileInputStream(entry.originalFile));
         }
         throw new IOException("图库预览文件已丢失。");
+    }
+
+    byte[] previewPacked(File original) throws IOException {
+        return createPreview(() -> new FileInputStream(original));
     }
 
     InputStream original(Entry entry) throws IOException {
@@ -321,20 +433,36 @@ final class GalleryStore {
     private Map<String, JSONObject> records() throws IOException, JSONException {
         if (records != null) return records;
         Map<String, JSONObject> loaded = new LinkedHashMap<>();
-        try (FileInputStream input = index.openRead()) {
-            JSONArray rows = new JSONArray(new String(NaxLibrary.readBounded(input, MAX_INDEX), StandardCharsets.UTF_8));
-            if (rows.length() > MAX_ENTRIES) throw new IOException("图库目录大小异常。");
-            for (int i = 0; i < rows.length(); i++) {
-                JSONObject row = rows.getJSONObject(i);
+        try (JsonReader input = new JsonReader(new InputStreamReader(index.openRead(), StandardCharsets.UTF_8))) {
+            input.beginArray();
+            while (input.hasNext()) {
+                JSONObject row = readIndexRow(input);
                 String id = row.optString("id", "");
                 if (validId(id) && entryFile(id, row) != null) loaded.put(id, row);
             }
+            input.endArray();
         } catch (FileNotFoundException absent) {
             if (index.getBaseFile().exists()) throw absent;
         }
         cleanupLeftovers(loaded);
         records = loaded;
         return loaded;
+    }
+
+    private static JSONObject readIndexRow(JsonReader input) throws IOException, JSONException {
+        JSONObject row = new JSONObject();
+        input.beginObject();
+        while (input.hasNext()) {
+            String name = input.nextName();
+            switch (input.peek()) {
+                case BOOLEAN: row.put(name, input.nextBoolean()); break;
+                case NUMBER: row.put(name, input.nextLong()); break;
+                case STRING: row.put(name, input.nextString()); break;
+                default: input.skipValue();
+            }
+        }
+        input.endObject();
+        return row;
     }
 
     private void cleanupLeftovers(Map<String, JSONObject> loaded) {
@@ -357,11 +485,18 @@ final class GalleryStore {
     }
 
     private void writeIndex(Map<String, JSONObject> next) throws IOException {
-        byte[] bytes = new JSONArray(next.values()).toString().getBytes(StandardCharsets.UTF_8);
-        if (bytes.length > MAX_INDEX) throw new IOException("图库目录超过上限。");
         FileOutputStream output = index.startWrite();
         try {
-            output.write(bytes);
+            OutputStreamWriter writer = new OutputStreamWriter(output, StandardCharsets.UTF_8);
+            writer.write('[');
+            boolean first = true;
+            for (JSONObject row : next.values()) {
+                if (!first) writer.write(',');
+                writer.write(row.toString());
+                first = false;
+            }
+            writer.write(']');
+            writer.flush();
             index.finishWrite(output);
         } catch (IOException failure) {
             index.failWrite(output);
@@ -369,14 +504,25 @@ final class GalleryStore {
         }
     }
 
-    private long storedBytes(Map<String, JSONObject> current) {
-        long total = 0;
-        for (Map.Entry<String, JSONObject> item : current.entrySet()) {
-            File entry = entryFile(item.getKey(), item.getValue());
-            if (entry != null) total += entry.length();
-            total += promptFile(item.getKey()).length();
+    private void putRow(Map<String, JSONObject> current, String id, JSONObject row)
+            throws IOException, JSONException {
+        Map<String, JSONObject> next = new LinkedHashMap<>(current);
+        JSONObject previous = next.put(id, row);
+        try {
+            writeIndex(next);
+        } catch (IOException failure) {
+            releaseUnusedSource(row, current);
+            throw failure;
         }
-        return total;
+        records = next;
+        listed = null;
+        releaseUnusedSource(previous, next);
+    }
+
+    private static String cleanText(String value, String fallback, int limit) {
+        String text = value == null ? "" : value.replaceAll("[\\p{Cntrl}]", " ").trim();
+        if (text.isEmpty()) text = fallback;
+        return text.substring(0, Math.min(text.length(), limit));
     }
 
     private JSONObject publicRow(String id, JSONObject row) throws JSONException {
@@ -423,6 +569,7 @@ final class GalleryStore {
             throw failure;
         }
         records = next;
+        listed = null;
         releaseUnusedSource(previous, next);
     }
 
@@ -504,6 +651,11 @@ final class GalleryStore {
         final File previewFile;
         final File originalFile;
         final String originalMime;
+        final String name;
+        final String format;
+        final long createdAt;
+        final String sourceTitle;
+        final String sourcePage;
 
         Entry(String id, JSONObject row, File previewFile, File originalFile, String originalMime) {
             this.id = id;
@@ -512,6 +664,11 @@ final class GalleryStore {
             this.originalMime = originalMime == null || originalMime.isEmpty() ? "image/jpeg" : originalMime;
             String raw = row.optString("sourceUri", "");
             this.sourceUri = raw.startsWith("content://") ? Uri.parse(raw) : null;
+            this.name = row.optString("name", "导入的图片");
+            this.format = row.optString("format", "图片");
+            this.createdAt = row.optLong("createdAt");
+            this.sourceTitle = row.optString("sourceTitle");
+            this.sourcePage = row.optString("sourcePage");
         }
     }
 }

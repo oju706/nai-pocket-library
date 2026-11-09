@@ -16,7 +16,7 @@ import java.util.List;
 
 final class PackPhotoCache {
     private static final int MAX_IMAGE_BYTES = 12 * 1024 * 1024;
-    private static final int MAX_LIMIT_MIB = 1024;
+    private static final int MAX_LIMIT_MIB = 4096;
     private static final long MAX_AGE_MILLIS = 24L * 60L * 60L * 1000L;
     private static final String TEMP_PREFIX = ".pack-photo-";
     private static final String TEMP_SUFFIX = ".tmp";

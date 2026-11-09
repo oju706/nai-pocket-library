@@ -29,6 +29,7 @@ import org.json.JSONObject;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -76,6 +77,7 @@ public final class MainActivity extends Activity {
     private ImagePrompts imagePrompts;
     private GalleryStore gallery;
     private OnlinePacks.Export onlineExport;
+    private volatile File onlineGalleryTemp;
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
@@ -291,7 +293,7 @@ public final class MainActivity extends Activity {
                 case "listGallery":
                     files.execute(() -> {
                         try {
-                            Object entries = gallery.list();
+                            Object entries = gallery.list(value.isEmpty() ? 0 : Integer.parseInt(value));
                             runOnUiThread(() -> send(id, entries, null));
                         } catch (Exception failure) {
                             runOnUiThread(() -> send(id, null, "无法读取图库目录，请重试。"));
@@ -368,13 +370,25 @@ public final class MainActivity extends Activity {
                     }
                     readPhotoMetadata(id, value);
                     return;
+                case "saveOnlineToGallery":
+                case "exportPackImageHtml":
+                    if (fileOperationBusy()) {
+                        send(id, null, "正在读取其他图片或文件，请稍后再试。");
+                        return;
+                    }
+                    packImageToGallery(id, value, "exportPackImageHtml".equals(action));
+                    return;
                 case "galleryMetadata":
+                case "exportGalleryHtml":
+                case "exportGalleryOriginal":
                 case "saveLastOriginal":
                     if (fileOperationBusy()) {
                         send(id, null, "已有文件选择或导入正在进行。");
                         return;
                     }
                     if ("galleryMetadata".equals(action)) readGalleryMetadata(id, value);
+                    else if ("exportGalleryHtml".equals(action)) exportGalleryHtml(id, value);
+                    else if ("exportGalleryOriginal".equals(action)) exportGalleryOriginal(id, value);
                     else saveLastOriginal(id);
                     return;
                 case "hasOnline":
@@ -482,7 +496,7 @@ public final class MainActivity extends Activity {
         try {
             int limit = packCacheSettings.getInt(PACK_CACHE_LIMIT, DEFAULT_PACK_CACHE_LIMIT);
             if ("setPackCacheLimit".equals(action)) {
-                if (!Arrays.asList("0", "128", "256", "512", "1024").contains(value)) {
+                if (!Arrays.asList("0", "128", "256", "512", "1024", "2048", "4096").contains(value)) {
                     throw new IllegalArgumentException("缓存上限选项无效。");
                 }
                 limit = Integer.parseInt(value);
@@ -547,7 +561,7 @@ public final class MainActivity extends Activity {
                 if (output == null) throw new IOException("无法写入所选位置。");
                 Files.copy(export.file.toPath(), output);
             } catch (Exception failure) {
-                error = "保存原图失败，请检查手机空间并重试。";
+                error = "保存文件失败，请检查手机空间并重试。";
             } finally {
                 export.file.delete();
             }
@@ -586,6 +600,133 @@ public final class MainActivity extends Activity {
                 });
             }
         });
+    }
+
+    private void packImageToGallery(int id, String request, boolean exportOnly) {
+        JSONObject input;
+        List<String> path;
+        try {
+            input = new JSONObject(request);
+            String reference = input.getString("reference");
+            Uri route = Uri.parse(reference);
+            if (reference.length() > 2048 || !reference.startsWith("/") || reference.startsWith("//")
+                    || route.getAuthority() != null || route.getFragment() != null || route.getQuery() != null) {
+                throw new IOException("这张图没有有效的图包引用。");
+            }
+            path = route.getPathSegments();
+            if (path.size() != 3 || !("online-pack-image".equals(path.get(0))
+                    || SharedStylePacks.ORIGINAL_ROUTE.equals(path.get(0))
+                    || SharedStylePacks.REMOTE_ORIGINAL_ROUTE.equals(path.get(0)))) {
+                throw new IOException("请选择图包中的原图。");
+            }
+        } catch (Exception failure) {
+            send(id, null, "无法确认要保存的在线图包图片。");
+            return;
+        }
+
+        JSONObject source = new JSONObject();
+        try {
+            source.put("title", input.optString("label", ""))
+                    .put("source", input.optString("source", ""))
+                    .put("revision", input.optString("revision", ""))
+                    .put("imageId", input.optString("imageId", ""));
+        } catch (JSONException impossible) {
+            send(id, null, "无法确认要保存的在线图包信息。");
+            return;
+        }
+
+        galleryOperation = true;
+        files.execute(() -> {
+            File temporary = null;
+            try {
+                WebResourceResponse photo = libraryPhoto(path);
+                if (photo == null) throw new IOException("在线图包原图无法加载。");
+                temporary = File.createTempFile("pocket-online-export-", ".tmp", getCacheDir());
+                onlineGalleryTemp = temporary;
+                try (InputStream stream = photo.getData(); FileOutputStream output = new FileOutputStream(temporary)) {
+                    copyGalleryOriginal(stream, output);
+                }
+                File sourceFile = temporary;
+                runOnUiThread(() -> {
+                    if (web == null || isFinishing()) {
+                        cleanupOnlineGalleryTemp(sourceFile);
+                        galleryOperation = false;
+                        return;
+                    }
+                    ImagePrompts.Result completion = (resultId, value, error) -> {
+                        JSONObject summary = value instanceof JSONObject ? (JSONObject)value : null;
+                        if (!exportOnly && (error != null || summary == null)) {
+                            cleanupOnlineGalleryTemp(sourceFile);
+                            String message = error == null || error.isEmpty()
+                                    ? "无法读取在线图包原图的生成信息，未保存到图库。"
+                                    : "无法读取在线图包原图的生成信息，未保存到图库：" + error;
+                            finishOnlineGallerySave(id, null, message);
+                            return;
+                        }
+                        files.execute(() -> {
+                            if (exportOnly) {
+                                exportPackImageHtml(id, sourceFile, input, source, summary, error);
+                                return;
+                            }
+                            JSONObject saved = null;
+                            String message = null;
+                            try {
+                                saved = gallery.savePacked(sourceFile, input.optString("name", "在线图包图片"),
+                                        source, summary);
+                            } catch (Exception | OutOfMemoryError failure) {
+                                message = failure instanceof IOException && failure.getMessage() != null
+                                        ? failure.getMessage() : "无法保存在线图包图片到图库，请重试。";
+                            } finally {
+                                cleanupOnlineGalleryTemp(sourceFile);
+                            }
+                            JSONObject result = saved;
+                            String problem = message;
+                            runOnUiThread(() -> finishOnlineGallerySave(id, result, problem));
+                        });
+                    };
+                    try {
+                        imagePrompts.readGallery(id, sourceFile, completion);
+                    } catch (RuntimeException failure) {
+                        cleanupOnlineGalleryTemp(sourceFile);
+                        finishOnlineGallerySave(id, null, "无法读取在线图包原图，未保存到图库。");
+                    }
+                });
+            } catch (Exception | OutOfMemoryError failure) {
+                cleanupOnlineGalleryTemp(temporary);
+                String message = failure instanceof IOException && failure.getMessage() != null
+                        ? failure.getMessage() : "在线图包原图无法加载，未保存到图库。";
+                runOnUiThread(() -> finishOnlineGallerySave(id, null, message));
+            }
+        });
+    }
+
+    private void exportPackImageHtml(int id, File original, JSONObject input, JSONObject source,
+                                     JSONObject summary, String unavailableReason) {
+        try {
+            JSONObject photo = new JSONObject().put("name", input.optString("name", "图包图片"))
+                    .put("source", source.optString("title")).put("sourcePage", source.optString("source"))
+                    .put("id", source.optString("imageId")).put("sourceRevision", source.optString("revision"))
+                    .put("storageKind", "pack-preview");
+            OnlinePacks.Export export = GalleryShare.prepare(getCacheDir(), photo,
+                    gallery.previewPacked(original), summary, unavailableReason);
+            runOnUiThread(() -> launchDocumentExport(id, export));
+        } catch (Exception | OutOfMemoryError failure) {
+            String error = failure instanceof IOException && failure.getMessage() != null
+                    ? failure.getMessage() : "无法导出图包图文，请重试。";
+            runOnUiThread(() -> finishOnlineGallerySave(id, null, error));
+        } finally {
+            cleanupOnlineGalleryTemp(original);
+        }
+    }
+
+    private void finishOnlineGallerySave(int id, JSONObject value, String error) {
+        galleryOperation = false;
+        send(id, value, error);
+    }
+
+    private void cleanupOnlineGalleryTemp(File temporary) {
+        if (temporary != null) temporary.delete();
+        if (onlineGalleryTemp == temporary) onlineGalleryTemp = null;
     }
 
     private void readGalleryMetadata(int id, String entryId) {
@@ -662,6 +803,84 @@ public final class MainActivity extends Activity {
     private void finishGalleryMetadata(int id, JSONObject value, String error) {
         galleryOperation = false;
         send(id, value, error);
+    }
+
+    private void exportGalleryHtml(int id, String entryId) {
+        galleryOperation = true;
+        files.execute(() -> {
+            try {
+                GalleryStore.Entry entry = gallery.entry(entryId);
+                JSONObject cached = gallery.cachedPrompt(entryId);
+                byte[] preview = gallery.preview(entry);
+                String reason = cached == null
+                        ? "图库中没有可导出的生成信息；原图不可读取或未包含可识别参数。"
+                        : null;
+                OnlinePacks.Export export = GalleryShare.prepare(getCacheDir(), entry, preview, cached, reason);
+                runOnUiThread(() -> launchDocumentExport(id, export));
+            } catch (Exception | OutOfMemoryError failure) {
+                String message = failure instanceof IOException && failure.getMessage() != null
+                        ? failure.getMessage() : "无法准备图库导出，请重试。";
+                runOnUiThread(() -> {
+                    galleryOperation = false;
+                    send(id, null, message);
+                });
+            }
+        });
+    }
+
+    private void exportGalleryOriginal(int id, String entryId) {
+        galleryOperation = true;
+        files.execute(() -> {
+            File stage = null;
+            try {
+                GalleryStore.Entry entry = gallery.entry(entryId);
+                stage = File.createTempFile("pocket-online-export-", ".tmp", getCacheDir());
+                try (InputStream original = gallery.original(entry); FileOutputStream output = new FileOutputStream(stage)) {
+                    copyGalleryOriginal(original, output);
+                }
+                String mime = entry.originalMime;
+                String extension = "image/png".equals(mime) ? ".png" : "image/webp".equals(mime) ? ".webp" : ".jpg";
+                String name = entry.name.replaceAll("(?i)\\.(?:png|webp|jpe?g)$", "") + extension;
+                OnlinePacks.Export export = new OnlinePacks.Export(stage, name, mime);
+                runOnUiThread(() -> launchDocumentExport(id, export));
+            } catch (Exception | OutOfMemoryError failure) {
+                if (stage != null) stage.delete();
+                String error = failure instanceof IOException && failure.getMessage() != null
+                        ? failure.getMessage() : "手机原图已无法读取，仍可导出小预览和参数。";
+                runOnUiThread(() -> finishOnlineGallerySave(id, null, error));
+            }
+        });
+    }
+
+    private static void copyGalleryOriginal(InputStream input, OutputStream output) throws IOException {
+        byte[] buffer = new byte[32768];
+        int total = 0;
+        for (int count; (count = input.read(buffer)) != -1;) {
+            if (Thread.currentThread().isInterrupted()) throw new IOException("导出已取消。");
+            total += count;
+            if (total > ImagePrompts.MAX_INPUT) throw new IOException("单张原图超过 32 MB。");
+            output.write(buffer, 0, count);
+        }
+        if (total == 0) throw new IOException("原图为空，无法导出。");
+    }
+
+    private void launchDocumentExport(int id, OnlinePacks.Export export) {
+        galleryOperation = false;
+        if (web == null || isFinishing()) {
+            export.file.delete();
+            return;
+        }
+        Intent save = new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+                .setType(export.mime).putExtra(Intent.EXTRA_TITLE, export.name);
+        try {
+            startActivityForResult(save, PICK_ONLINE_EXPORT);
+            onlineExport = export;
+            picker = PICK_ONLINE_EXPORT;
+            pickerRequest = id;
+        } catch (RuntimeException failure) {
+            export.file.delete();
+            send(id, null, "无法打开安卓文件保存窗口。");
+        }
     }
 
     private void deleteGalleryImage(int id, String entryId) {
@@ -924,6 +1143,7 @@ public final class MainActivity extends Activity {
     protected void onDestroy() {
         files.shutdownNow();
         if (onlineExport != null) onlineExport.file.delete();
+        cleanupOnlineGalleryTemp(onlineGalleryTemp);
         updateChecks.shutdownNow();
         if (backup != null) backup.cancelOnDestroy();
         if (imagePrompts != null) imagePrompts.cancelOnDestroy();

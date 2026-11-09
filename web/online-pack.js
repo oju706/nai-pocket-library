@@ -257,6 +257,43 @@
           metadata.textContent = '查看提示词与参数';
         }
       });
+      let gallerySaving = false;
+      let galleryStored = false;
+      const saveToGallery = button('存小预览和参数到图库', 'soft', () => transferGallery(false));
+      const exportHtml = button('直接导出图文', 'soft', () => transferGallery(true));
+      async function transferGallery(exportOnly) {
+        if (saving || gallerySaving || (!exportOnly && galleryStored)) return;
+        const activeScreen = screenRevision;
+        gallerySaving = true;
+        updateSave();
+        try {
+          const result = await native(exportOnly ? 'exportPackImageHtml' : 'saveOnlineToGallery', JSON.stringify({
+            reference: item.original,
+            name: title,
+            label: packLabel,
+            source: item.source || catalog.title,
+            revision: catalog.revision,
+            imageId: item.id,
+          }));
+          if (activeScreen !== screenRevision) return;
+          if (exportOnly) {
+            if (result === true) toast('已导出，可用浏览器打开或在文件应用分享');
+            return;
+          }
+          if (!result || !result.id) throw new Error('没有收到图库保存结果。');
+          galleryStored = result.promptCached === true;
+          toast(galleryStored
+            ? '已存小预览和生成信息到图库'
+            : '已存小预览，但生成信息未能永久保存');
+        } catch (error) {
+          if (activeScreen === screenRevision) toast(error?.message || '保存到图库失败，请重试。');
+        } finally {
+          if (activeScreen === screenRevision) {
+            gallerySaving = false;
+            updateSave();
+          }
+        }
+      }
       let showOriginal = originalDetails.has(item.id);
       let image = null;
       function showImage(full) {
@@ -293,10 +330,14 @@
       }
       body.append(view);
       showImage(showOriginal);
-      actions.append(save, metadata);
+      actions.append(save, metadata, saveToGallery, exportHtml);
       bindSaveState(() => {
-        save.disabled = saving;
+        save.disabled = saving || gallerySaving;
         save.textContent = saving ? '准备保存…' : saveLabel;
+        saveToGallery.disabled = saving || gallerySaving || galleryStored;
+        exportHtml.disabled = saving || gallerySaving;
+        saveToGallery.textContent = galleryStored ? '已存到图库'
+          : gallerySaving ? '正在存到图库…' : '存小预览和参数到图库';
       });
     }
 

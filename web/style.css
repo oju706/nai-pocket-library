@@ -107,6 +107,10 @@ h2 { font-size: 19px; line-height: 1.35; margin: 0; }
 .card-main .row-text { padding: 10px 10px 3px; }
 .card-main .row-title { font-size: 14px; min-height: 35px; }
 .card > .icon-button { position: absolute; right: 4px; bottom: 0; }
+.card-actions { display: flex; align-items: center; justify-content: flex-end; gap: 4px; padding: 0 5px; }
+.card > .card-actions { position: absolute; inset: auto 0 0; }
+.dense-gallery .card > .card-actions { position: static; justify-content: center; padding-bottom: 3px; }
+.dense-gallery .card-actions button { white-space: nowrap; }
 .card-photo { display: block; width: 100%; aspect-ratio: 4 / 5; position: relative; background: var(--sand); overflow: hidden; }
 .row-photo { display: block; flex: none; width: 66px; height: 80px; position: relative; background: var(--sand); border-radius: 8px; overflow: hidden; }
 .preview-placeholder { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 8px; color: var(--muted); font-size: 11px; text-align: center; padding: 4px; }

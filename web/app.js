@@ -28,6 +28,33 @@ const state = {
 };
 const koreanPacks = [['curated', 'Curated 精选'], ['33000', '33000-Q'], ['55000', '55000-Q']];
 const koreanCatalogs = new Map();
+const artistDrawBatchSize = 10;
+const artistDrawStoragePrefix = 'pocket-artist-draw-v1';
+const artistDrawPoolConfig = [
+  {
+    id: 'filtered',
+    label: () => '当前筛选',
+    rule: (context) => `filter:${JSON.stringify(context.filterKey)}`,
+    cards: (context) => context.matching,
+  },
+  {
+    id: 'all',
+    label: () => '当前来源全部',
+    rule: () => 'all',
+    cards: (context) => context.cards,
+  },
+  {
+    id: 'post-band',
+    label: (item) => item.band === 'unknown' ? '作品数 · 未统计'
+      : `作品数 · ${number.format(item.band)}–${number.format(Number(item.band) + 99)}`,
+    items: (context) => context.korean
+      ? context.postBands.map((band) => ({ band, key: `post-band:${band}` }))
+      : [],
+    rule: (_context, item) => `post:${item.band}`,
+    cards: (context, item) => context.cards.filter((card) => matchesPostCountBand(card, item.band)),
+  },
+];
+let artistDrawSession = null;
 const knowledgeKinds = [['all', '全部'], ...PocketSources.knowledgeKinds];
 const characterFields = [['work', '作品'], ['outfit', '服装／版本'], ['gender', '性别'], ['species', '类型']];
 const genderChoices = [['', '未标注'], ['女性', '女性'], ['男性', '男性'], ['其他', '其他']];
@@ -93,6 +120,231 @@ function matchesPostCountBand(card, band) {
   return band === 'all' || postCountBand(card.postCount) === band;
 }
 
+function artistDrawTag(card) {
+  return searchText(groupingName(card?.title))
+    || searchText(String(card?.prompt || '').replace(/^artist:\s*/i, ''));
+}
+
+const favoriteSaves = new Map();
+
+function favoriteIdentity(card) {
+  return card.section === 'knowledge'
+    ? JSON.stringify(['knowledge', String(card.id)])
+    : cardIdentity(card);
+}
+
+function findSavedCard(card, cards = state.personal) {
+  return cards.find((saved) => saved.section === card.section
+    && (card.section === 'knowledge'
+      ? saved.from === card.id
+      : cardIdentity(saved) === cardIdentity(card)));
+}
+
+function mergeFavoritePhotos(card, current = []) {
+  const photos = Array.isArray(current) ? current.map((photo) => ({ ...photo })) : [];
+  for (const photo of card.photos || []) {
+    if (photos.some((item) => item.url === photo.url)) continue;
+    const origin = card.license ? 'Carlyone / NAX · CC BY 4.0' : card.source || '';
+    photos.push({
+      ...photo,
+      label: [origin, photo.label || '样图'].filter(Boolean).join(' · '),
+    });
+  }
+  return photos;
+}
+
+function savedFavoriteCard(card, existing = null) {
+  if (existing) {
+    return { ...existing, photos: mergeFavoritePhotos(card, existing.photos), updated: Date.now() };
+  }
+  const saved = {
+    id: crypto.randomUUID?.() ?? `local-${Date.now()}-${Math.random()}`,
+    from: card.id,
+    title: card.title,
+    prompt: card.prompt || '',
+    note: card.note || '',
+    section: card.section,
+    kind: card.kind,
+    model: card.model || '通用',
+    photos: (card.photos || []).map(({ url, label }) => ({ url, label })),
+    source: card.source,
+    sourceUrl: card.sourceUrl,
+    license: card.license,
+    local: true,
+    updated: Date.now(),
+    generation: card.generation,
+  };
+  for (const key of ['work', 'outfit', 'gender', 'species']) {
+    if (card[key] !== undefined) saved[key] = card[key];
+  }
+  return saved;
+}
+
+function syncFavoriteControls(identity) {
+  for (const control of document.querySelectorAll('[data-favorite-card]')) {
+    if (control.dataset.favoriteCard !== identity) continue;
+    control.textContent = '已收藏';
+    control.className = 'soft compact';
+    control.disabled = true;
+    control.setAttribute('aria-pressed', 'true');
+    control.removeAttribute('aria-busy');
+  }
+}
+
+async function saveFavorite(card) {
+  const identity = favoriteIdentity(card);
+  if (favoriteSaves.has(identity)) return favoriteSaves.get(identity);
+  const pending = (async () => {
+    let result;
+    await useCards('readwrite', (store) => {
+      const request = store.getAll();
+      request.onsuccess = () => {
+        const existing = findSavedCard(card, request.result);
+        const saved = savedFavoriteCard(card, existing);
+        result = { saved, existing: Boolean(existing) };
+        store.put(saved);
+      };
+      return request;
+    });
+    if (!result) throw new Error('收藏写入未完成。');
+    state.personal = [result.saved, ...state.personal.filter((item) => item.id !== result.saved.id)];
+    syncFavoriteControls(identity);
+    return result;
+  })().finally(() => {
+    favoriteSaves.delete(identity);
+  });
+  favoriteSaves.set(identity, pending);
+  return pending;
+}
+
+function favoriteControl(card) {
+  const identity = favoriteIdentity(card);
+  const existing = findSavedCard(card);
+  const favorite = button(existing ? '已收藏' : '♡ 收藏', 'soft compact', async () => {
+    favorite.disabled = true;
+    favorite.setAttribute('aria-busy', 'true');
+    favorite.textContent = '收藏中…';
+    const revision = screenRevision;
+    try {
+      const result = await saveFavorite(card);
+      if (revision === screenRevision) {
+        toast(result.existing ? '已有同一条收藏，已保留原备注和配图' : '已收藏到「我的词库」');
+      }
+    } catch {
+      if (revision !== screenRevision) return;
+      favorite.textContent = '♡ 收藏';
+      favorite.disabled = false;
+      favorite.removeAttribute('aria-busy');
+      toast('收藏失败，请检查手机剩余空间后重试。');
+    }
+  });
+  favorite.dataset.favoriteCard = identity;
+  favorite.setAttribute('aria-pressed', String(Boolean(existing)));
+  favorite.disabled = Boolean(existing);
+  return favorite;
+}
+
+function artistDrawSourceReady() {
+  if (state.section !== 'artist' || state.mode !== 'online') return false;
+  if (isKorean()) return Array.isArray(state.korean) && !state.koreanTask;
+  if (state.artistSource === 'nax') return Array.isArray(state.online) && !state.onlineTask;
+  if (state.artistSource === 'imported') return Boolean(state.pack) && Array.isArray(state.packRows) && !state.packMessage;
+  return false;
+}
+
+function artistDrawContext() {
+  if (!artistDrawSourceReady()) return null;
+  const korean = isKorean();
+  let cards;
+  let sourceId;
+  let sourceLabel;
+  let postBands = [];
+  if (korean) {
+    cards = state.korean.filter((card) => card.section === 'artist');
+    sourceId = `korean:${state.koreanPack}`;
+    sourceLabel = state.koreanPack === 'all' ? '韩国全部图包'
+      : `韩国 · ${koreanPacks.find(([id]) => id === state.koreanPack)?.[1] || state.koreanPack}`;
+    postBands = state.koreanPostBands;
+  } else if (state.artistSource === 'nax') {
+    cards = state.online.filter((card) => card.section === 'artist' && card.model === state.model);
+    sourceId = `nax:${state.model}`;
+    sourceLabel = `NAX · ${state.model}`;
+  } else {
+    cards = state.packRows.filter((card) => card.section === 'artist');
+    sourceId = `imported:${state.pack.id}`;
+    sourceLabel = `已导入 · ${state.pack.name}`;
+  }
+  const terms = searchText(query.value).split(/[,，]+/).map((term) => term.trim()).filter(Boolean);
+  const postBand = korean ? state.artistPostBand : 'all';
+  const matching = cards.filter((card) => {
+    if (!matchesArtistGroup(card, state.artistGroup) || !matchesPostCountBand(card, postBand)) return false;
+    if (!terms.length) return true;
+    const words = searchText([card.title, card.prompt, card.note, card.work, card.outfit, card.gender, card.species].join(' '));
+    return terms.every((term) => words.includes(term));
+  });
+  const filterKey = {
+    keywords: [...new Set(terms)].sort(),
+    group: state.artistGroup,
+    postBand,
+  };
+  return {
+    cards, matching, sourceId, sourceLabel, korean, postBands,
+    filterKey, key: JSON.stringify({ sourceId, filterKey }),
+  };
+}
+
+function artistDrawPoolOptions(context) {
+  return artistDrawPoolConfig.flatMap((definition) => {
+    const items = definition.items ? definition.items(context) : [null];
+    return items.map((item) => ({
+      key: item?.key || definition.id,
+      label: definition.label(item),
+      ruleKey: definition.rule(context, item),
+      cards: () => definition.cards(context, item),
+    }));
+  });
+}
+
+function artistDrawHistoryKey(context, pool) {
+  return [artistDrawStoragePrefix, context.sourceId, pool.ruleKey]
+    .map((part) => encodeURIComponent(part)).join(':');
+}
+
+function readArtistDrawHistory(context, pool) {
+  try {
+    const values = JSON.parse(localStorage.getItem(artistDrawHistoryKey(context, pool)) || '[]');
+    return new Set(Array.isArray(values) ? values.map((value) => searchText(value)).filter(Boolean) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function writeArtistDrawHistory(context, pool, seen) {
+  try {
+    localStorage.setItem(artistDrawHistoryKey(context, pool), JSON.stringify([...seen]));
+  } catch { /* The current session still de-duplicates when storage is unavailable. */ }
+}
+
+function uniqueArtistDrawCards(cards) {
+  const unique = new Map();
+  for (const card of cards) {
+    const tag = artistDrawTag(card);
+    if (!tag) continue;
+    const current = unique.get(tag);
+    if (!current || (card.photos?.length || 0) > (current.photos?.length || 0)) unique.set(tag, card);
+  }
+  return [...unique.values()];
+}
+
+function sampleArtistDrawCards(cards, count) {
+  const size = Math.min(count, cards.length);
+  for (let index = 0; index < size; index++) {
+    const other = index + Math.floor(Math.random() * (cards.length - index));
+    [cards[index], cards[other]] = [cards[other], cards[index]];
+  }
+  return cards.slice(0, size);
+}
+
 function shuffleArtists(cards, seed) {
   let random = seed;
   for (let i = cards.length - 1; i > 0; i--) {
@@ -101,6 +353,7 @@ function shuffleArtists(cards, seed) {
     [cards[i], cards[other]] = [cards[other], cards[i]];
   }
 }
+
 function isRemote() {
   return state.mode === 'online' && (state.section === 'knowledge' ? state.knowledgeTab === 'images'
     : state.section === 'artist' ? state.artistSource === 'nax' : true);
@@ -108,21 +361,23 @@ function isRemote() {
 
 function isKorean() { return state.mode === 'online' && state.section === 'artist' && state.artistSource === 'korean'; }
 
+function loadKoreanCatalog(id) {
+  if (!koreanCatalogs.has(id)) {
+    koreanCatalogs.set(id, getJson(`/api/korean.json?pack=${id}`).then(PocketSources.koreanCards).catch((error) => {
+      koreanCatalogs.delete(id);
+      throw error;
+    }));
+  }
+  return koreanCatalogs.get(id);
+}
+
 function ensureKorean() {
   if (state.korean || state.koreanTask?.pack === state.koreanPack) return;
   const task = { pack: state.koreanPack };
   const packs = task.pack === 'all' ? koreanPacks.map(([id]) => id) : [task.pack];
   state.koreanError = false;
   state.koreanTask = task;
-  Promise.all(packs.map((id) => {
-    if (!koreanCatalogs.has(id)) {
-      koreanCatalogs.set(id, getJson(`/api/korean.json?pack=${id}`).then(PocketSources.koreanCards).catch((error) => {
-        koreanCatalogs.delete(id);
-        throw error;
-      }));
-    }
-    return koreanCatalogs.get(id);
-  })).then((catalogs) => {
+  Promise.all(packs.map(loadKoreanCatalog)).then((catalogs) => {
     if (state.koreanTask !== task) return;
     const artists = new Map();
     for (const catalog of catalogs) for (const card of catalog) {
@@ -424,6 +679,7 @@ async function selectPack(id) {
     if (state.pack !== pack) return;
     state.packMessage = '读取失败。可以重新选择原文件。';
   }
+  renderArtistDiscovery();
   renderList();
 }
 
@@ -601,7 +857,10 @@ function renderArtistDiscovery() {
     toolbar.append(prefixes);
   }
   if (state.section === 'artist') {
-    toolbar.append(button('换一批', 'soft compact', () => {
+    const draw = button('随机发现画师', 'primary compact', openArtistDrawScreen);
+    draw.disabled = !artistDrawSourceReady();
+    draw.title = draw.disabled ? '当前画师来源加载完成后可用' : '从选定的画师池发现最多十位画师';
+    toolbar.append(draw, button('换一批', 'soft compact', () => {
       state.artistShuffle = (Math.random() * 0xffffffff >>> 0) || 1;
       resetPage();
       render();
@@ -808,7 +1067,7 @@ const previews = new IntersectionObserver((entries) => {
   }
 }, { root: main, rootMargin: '80px 0px' });
 
-function thumbnail(card, grid) {
+function thumbnail(card, grid, eager = false) {
   const box = node('span', grid ? 'card-photo' : 'row-photo');
   const placeholder = node('span', 'preview-placeholder');
   placeholder.append(icon(sections[card.section].icon));
@@ -823,16 +1082,17 @@ function thumbnail(card, grid) {
     img.onload = () => { placeholder.remove(); img.classList.add('loaded'); };
     img.onerror = () => { caption.textContent = '预览暂不可用'; img.remove(); };
     box.append(img);
-    previews.observe(img);
+    if (eager) img.src = img.dataset.src;
+    else previews.observe(img);
   }
   return box;
 }
 
-function row(card) {
-  const view = state.galleryFocus ? 'grid' : views[state.section];
-  const grid = view === 'grid';
+function row(card, options = {}) {
+  const view = options.view || (state.galleryFocus ? 'grid' : views[state.section]);
+  const grid = options.grid ?? view === 'grid';
   const item = node('article', grid ? 'card' : 'row');
-  const hit = button(card.title, grid ? 'card-main' : 'row-main', () => showCard(card));
+  const hit = button(card.title, grid ? 'card-main' : 'row-main', options.open || (() => showCard(card)));
   hit.setAttribute('aria-label', card.title);
   const mark = node('span', 'row-mark');
   mark.append(icon(sections[card.section].icon));
@@ -843,11 +1103,18 @@ function row(card) {
   if (Number.isSafeInteger(card.postCount)) caption.push(`原库 ${number.format(card.postCount)} 条`);
   text.append(node('span', 'row-title', card.title), node('span', 'row-caption', caption.filter(Boolean).join(' · ')));
   if (card.section === 'knowledge' && card.note && view !== 'compact') text.append(node('span', 'row-note', card.note));
-  hit.replaceChildren(view === 'compact' || (view === 'list' && !card.photos.length) ? mark : thumbnail(card, grid), text);
+  hit.replaceChildren(view === 'compact' || (view === 'list' && !card.photos.length)
+    ? mark : thumbnail(card, grid, options.eager), text);
   item.append(hit);
-  if (!state.galleryFocus) {
-    if (card.prompt) item.append(button(`复制 ${card.title}`, 'icon-button', () => copy(card.prompt), 'copy'));
-    else item.append(button(`查看 ${card.title}`, 'icon-button', () => showCard(card), 'arrow'));
+  if (options.actions) item.append(options.actions);
+  else {
+    const controls = node('div', 'card-actions');
+    if (state.mode !== 'personal' && !card.local) controls.append(favoriteControl(card));
+    if (options.trailing !== false && !state.galleryFocus) {
+      if (card.prompt) controls.append(button(`复制 ${card.title}`, 'icon-button', () => copy(card.prompt), 'copy'));
+      else controls.append(button(`查看 ${card.title}`, 'icon-button', () => showCard(card), 'arrow'));
+    }
+    if (controls.childElementCount) item.append(controls);
   }
   return item;
 }
@@ -965,7 +1232,7 @@ function renderList() {
   if (pages > 1) results.append(pageJump(state.page, pages, move));
   const list = node('div', state.galleryFocus ? `gallery gallery-${state.galleryColumns} dense-gallery`
     : views[state.section] === 'grid' ? 'gallery' : 'list');
-  list.append(...matching.slice(start, start + capacity).map(row));
+  list.append(...matching.slice(start, start + capacity).map((card) => row(card)));
   results.append(list);
   if (pages > 1) results.append(pageSteps(state.page, pages, move));
   if (remote) {
@@ -977,6 +1244,124 @@ function renderList() {
     info.append(button('查看原帖', 'text-button', () => openLink('https://arca.live/b/aiart/185691299')));
     results.append(info);
   }
+}
+
+function artistDrawPool(session) {
+  return session.pools.find((pool) => pool.key === session.poolKey) || session.pools[0];
+}
+
+function drawNextArtistBatch(session) {
+  const pool = artistDrawPool(session);
+  const unique = uniqueArtistDrawCards(pool.cards());
+  const seen = new Set([...readArtistDrawHistory(session.context, pool), ...session.seen]);
+  const available = unique.filter((card) => !seen.has(artistDrawTag(card)));
+  const batch = sampleArtistDrawCards(available, artistDrawBatchSize);
+  for (const card of batch) seen.add(artistDrawTag(card));
+  writeArtistDrawHistory(session.context, pool, seen);
+  session.seen = seen;
+  session.batch = batch;
+  session.totalUnique = unique.length;
+  session.remaining = available.length - batch.length;
+  session.exhausted = available.length === 0 || batch.length >= available.length;
+  session.hasDrawn = true;
+}
+
+function artistDrawCard(card) {
+  const controls = node('div', 'card-actions');
+  controls.append(favoriteControl(card));
+  return row(card, {
+    grid: true,
+    view: 'grid',
+    eager: true,
+    trailing: false,
+    open: () => showCard(card, 0, renderArtistDrawScreen),
+    actions: controls,
+  });
+}
+
+function renderArtistDrawScreen() {
+  const session = artistDrawSession;
+  if (!session) return;
+  openScreen('随机发现画师');
+  const pool = artistDrawPool(session);
+  body.append(node('p', 'resource-note',
+    `${session.context.sourceLabel} · 每批最多 ${artistDrawBatchSize} 位。同一个池会跳过已展示的画师。`));
+  const pools = options(session.pools.map(({ key, label }) => [key, label]), session.poolKey);
+  pools.addEventListener('change', () => {
+    session.poolKey = pools.value;
+    session.seen = new Set();
+    drawNextArtistBatch(session);
+    renderArtistDrawScreen();
+  });
+  body.append(field('画师池', pools));
+  if (session.batch.length) {
+    const gallery = node('div', 'gallery');
+    gallery.append(...session.batch.map(artistDrawCard));
+    body.append(gallery);
+    if (session.exhausted) {
+      body.append(node('p', 'resource-note', '这是本池最后一批。可以重置本池记录后再浏览。'));
+    }
+  } else {
+    const panel = node('section', 'empty');
+    const mark = node('div', 'row-mark');
+    mark.append(icon('artist'));
+    panel.append(mark,
+      node('h2', '', session.totalUnique ? '这个池已经看完' : '这个池没有可浏览的画师'),
+      node('p', '', session.totalUnique
+        ? `本池的 ${number.format(session.totalUnique)} 位画师都已出现过。重置只清除「${pool.label}」的历史，不会删除收藏。`
+        : '换一个画师池，或回到画师列表调整筛选。'));
+    body.append(panel);
+  }
+  if (session.totalUnique && session.exhausted) {
+    actions.append(button('重置本池浏览记录', 'soft', resetArtistDrawPool));
+  } else if (session.remaining > 0) {
+    actions.append(button(`再看 ${Math.min(artistDrawBatchSize, session.remaining)} 位`, 'primary', () => {
+      drawNextArtistBatch(session);
+      renderArtistDrawScreen();
+    }));
+  }
+}
+
+function resetArtistDrawPool() {
+  const session = artistDrawSession;
+  if (!session) return;
+  const pool = artistDrawPool(session);
+  if (!confirm(`重置「${pool.label}」中已出现的画师记录，并重新抽取？收藏不会被删除。`)) return;
+  try {
+    localStorage.removeItem(artistDrawHistoryKey(session.context, pool));
+  } catch { /* A fresh in-memory session can still continue. */ }
+  session.seen = new Set();
+  session.batch = [];
+  session.hasDrawn = false;
+  drawNextArtistBatch(session);
+  renderArtistDrawScreen();
+}
+
+function openArtistDrawScreen() {
+  const context = artistDrawContext();
+  if (!context) {
+    toast('当前画师来源尚未加载完成。');
+    return;
+  }
+  const pools = artistDrawPoolOptions(context);
+  const previous = artistDrawSession;
+  const sameContext = previous?.context.key === context.key;
+  if (sameContext) {
+    previous.context = context;
+    previous.pools = pools;
+    if (!pools.some((pool) => pool.key === previous.poolKey)) previous.poolKey = pools[0].key;
+    if (!previous.hasDrawn) drawNextArtistBatch(previous);
+  } else {
+    const poolKey = context.filterKey.keywords.length || context.filterKey.group !== 'all'
+      || context.filterKey.postBand !== 'all' ? 'filtered' : 'all';
+    artistDrawSession = {
+      context, pools, poolKey,
+      seen: new Set(), batch: [],
+      totalUnique: 0, remaining: 0, exhausted: false, hasDrawn: false,
+    };
+    drawNextArtistBatch(artistDrawSession);
+  }
+  renderArtistDrawScreen();
 }
 
 let screenBack = null;
@@ -1027,7 +1412,7 @@ function canReadPhotoMetadata(url) {
     || /^\/korean-image\/(?:(?:33000|55000)\/)?\d+\/\d+$/.test(url));
 }
 
-function showPhotos(card, initialIndex = 0) {
+function showPhotos(card, initialIndex = 0, detailBack = null) {
   if (!card.photos.length) return;
   const photo = node('div', 'photo');
   const metadata = node('div', 'photo-metadata');
@@ -1065,7 +1450,7 @@ function showPhotos(card, initialIndex = 0) {
           if (revision !== screenRevision || photoIndex !== index || activeRequest !== metadataRequest || readMetadata.parentNode !== metadata) return;
           if (!data || typeof data !== 'object') throw new Error('没有收到这张样图的读取结果。');
           showPromptImport(data, {
-            back: () => showCard(card, photoIndex),
+            back: () => showCard(card, photoIndex, detailBack),
             resourcePhoto: {
               title: card.title,
               label: ref.label || `样图 ${photoIndex + 1}`,
@@ -1101,8 +1486,8 @@ function showPhotos(card, initialIndex = 0) {
   show();
 }
 
-function showCard(card, photoIndex = 0) {
-  openScreen('条目详情');
+function showCard(card, photoIndex = 0, back = null) {
+  openScreen('条目详情', back);
   body.append(node('h2', '', card.title));
   const badges = node('div', 'badges');
   for (const value of [sections[card.section].label, card.model, card.source].filter(Boolean)) {
@@ -1119,7 +1504,7 @@ function showCard(card, photoIndex = 0) {
     body.append(button('复制角色资料', 'soft compact', () => copy(profile)));
   }
   if (Number.isSafeInteger(card.postCount)) body.append(node('p', 'resource-note', `原库作品记录 ${number.format(card.postCount)} 条 · bequiet 的统计`));
-  showPhotos(card, photoIndex);
+  showPhotos(card, photoIndex, back);
   if (card.prompt) body.append(node('div', 'prompt', card.prompt));
   if (card.note) {
     body.append(node('p', 'detail-note', card.note));
@@ -1145,15 +1530,17 @@ function showCard(card, photoIndex = 0) {
     actions.append(button('编辑', 'soft', () => showEditor(card)));
     if (card.section === 'character') actions.append(button('另存服装', 'soft', () => showEditor({ ...card, id: card.from || card.id, local: false, outfit: '' })));
   }
-  else actions.append(button('加入我的', card.prompt ? 'soft' : 'primary', () => {
-    const existing = state.personal.find((saved) => saved.from === card.id || (card.section !== 'knowledge' && cardIdentity(saved) === cardIdentity(card)));
-    if (existing) {
-      const photos = [...existing.photos];
-      for (const photo of card.photos) if (!photos.some((item) => item.url === photo.url)) photos.push({ ...photo, label: `${card.license ? 'Carlyone / NAX · CC BY 4.0' : card.source || ''} · ${photo.label || '样图'}` });
-      showEditor({ ...existing, photos });
-      toast('已有同标签收藏，保留原内容并补充来源样图');
-    } else showEditor(card);
-  }));
+  else {
+    actions.append(favoriteControl(card));
+    actions.append(button('编辑后收藏', 'soft', () => {
+      const existing = findSavedCard(card);
+      if (existing) {
+        const photos = mergeFavoritePhotos(card, existing.photos);
+        showEditor({ ...existing, photos });
+        toast('已有同一条收藏，保留原内容并补充来源样图');
+      } else showEditor(card);
+    }));
+  }
 }
 
 function cardIdentity(card) {
@@ -1534,10 +1921,380 @@ function addCopyablePrompt(container, label, value) {
   container.append(section);
 }
 
-function showPromptImport(data, { back = null, galleryItem = null, resourcePhoto = null } = {}) {
+function artistTagKey(value) {
+  return String(value ?? '').normalize('NFKC').trim().replace(/[_\s]+/g, ' ').toLocaleLowerCase();
+}
+
+function unescapeTagCommas(value) {
+  return String(value ?? '').replace(/\\,/g, ',');
+}
+
+function splitPromptTags(value) {
+  const parts = [];
+  let start = 0;
+  let depth = 0;
+  let quote = '';
+  const text = String(value ?? '');
+  for (let index = 0; index < text.length; index++) {
+    const character = text[index];
+    if (character === '\\') {
+      index++;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) quote = '';
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      continue;
+    }
+    if ('([{'.includes(character)) depth++;
+    else if (')]}'.includes(character) && depth > 0) depth--;
+    if (depth === 0 && character === ',') {
+      parts.push(text.slice(start, index));
+      start = index + 1;
+    }
+  }
+  parts.push(text.slice(start));
+  return parts;
+}
+
+function unwrapPromptTag(value) {
+  let result = String(value ?? '').trim();
+  let changed = false;
+  while (result.length >= 2) {
+    const opening = result[0];
+    const closing = opening === '(' ? ')' : opening === '[' ? ']' : opening === '{' ? '}' : '';
+    if (!closing || result[result.length - 1] !== closing) break;
+    let depth = 0;
+    let closesAt = -1;
+    for (let index = 0; index < result.length; index++) {
+      const character = result[index];
+      if (character === '\\') {
+        index++;
+        continue;
+      }
+      if (character === opening) depth++;
+      else if (character === closing) {
+        depth--;
+        if (depth === 0) {
+          closesAt = index;
+          break;
+        }
+      }
+    }
+    if (closesAt !== result.length - 1) break;
+    result = result.slice(1, -1).trim();
+    changed = true;
+  }
+  return { value: result, changed };
+}
+
+function visitPromptTag(value, original, weightedContext, output) {
+  let tag = String(value ?? '').trim();
+  if (!tag) return;
+  tag = tag.replace(/^::\s*/, '').trim();
+  tag = tag.replace(/\s*::\s*$/, '').trim();
+  if (!tag) return;
+  const weightedPrefix = /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)\s*::\s*/.exec(tag);
+  if (weightedPrefix) {
+    let body = tag.slice(weightedPrefix[0].length).trim();
+    if (body.endsWith('::')) body = body.slice(0, -2).trim();
+    for (const part of splitPromptTags(body)) visitPromptTag(part, original, true, output);
+    return;
+  }
+  const unwrapped = unwrapPromptTag(tag);
+  if (unwrapped.changed) {
+    const parts = splitPromptTags(unwrapped.value);
+    for (const part of parts) visitPromptTag(part, original, true, output);
+    return;
+  }
+  if (weightedContext) {
+    tag = tag.replace(/\s*:\s*[+-]?(?:\d+(?:\.\d+)?|\.\d+)\s*$/, '').trim();
+  }
+  if (!tag) return;
+  const explicit = /^artist\s*:\s*([\s\S]*)$/i.exec(tag);
+  const name = unescapeTagCommas((explicit ? explicit[1] : tag).trim()).trim();
+  if (!name) return;
+  output.push({
+    explicit: Boolean(explicit),
+    name,
+    key: artistTagKey(name),
+    original: original || tag,
+  });
+}
+
+function extractPromptTags(value) {
+  const output = [];
+  for (const part of splitPromptTags(value)) {
+    const original = part.trim();
+    visitPromptTag(original, original, false, output);
+  }
+  return output;
+}
+
+function artistCardTag(card) {
+  const title = String(card?.title ?? '').normalize('NFKC').trim();
+  if (title) return title.replace(/^artist\s*:\s*/i, '').trim();
+  return String(card?.prompt ?? '').normalize('NFKC').trim().replace(/^artist\s*:\s*/i, '').trim();
+}
+
+function promptArtistCatalog(koreanResults = [], { loading = false } = {}) {
+  const records = [];
+  const identities = new Set();
+  const addCards = (cards, kind) => {
+    for (const card of Array.isArray(cards) ? cards : []) {
+      if (card?.section !== 'artist') continue;
+      const name = artistCardTag(card);
+      const key = artistTagKey(name);
+      if (!key) continue;
+      const identity = [kind, card.id, card.title, card.source, card.model].join('\u0000');
+      if (identities.has(identity)) continue;
+      identities.add(identity);
+      records.push({ card, key, name, kind });
+    }
+  };
+  if (loading) addCards(state.korean, 'korean');
+  for (const result of koreanResults) {
+    if (result.status === 'fulfilled') addCards(result.value, 'korean');
+  }
+  addCards(state.packRows, 'imported');
+  addCards(state.online, 'nax');
+  const index = new Map();
+  for (const record of records) {
+    if (!index.has(record.key)) index.set(record.key, []);
+    index.get(record.key).push(record);
+  }
+  const failures = koreanResults
+    .map((result, index) => result.status === 'rejected' ? koreanPacks[index]?.[1] : '')
+    .filter(Boolean);
+  return {
+    index,
+    loading,
+    koreanReady: koreanResults.filter((result) => result.status === 'fulfilled').length,
+    koreanFailures: failures,
+    naxCount: records.filter((record) => record.kind === 'nax').length,
+    importedCount: records.filter((record) => record.kind === 'imported').length,
+  };
+}
+
+function characterPromptCaption(entry) {
+  return typeof entry === 'string' ? entry : entry?.char_caption || '';
+}
+
+function promptArtistSources(generation) {
+  const positive = [];
+  const negative = [];
+  if (generation.prompt) positive.push({ label: '主提示词 · 正向', prompt: generation.prompt });
+  if (generation.negativePrompt) negative.push({ label: '主提示词 · 负向', prompt: generation.negativePrompt });
+  const characters = Array.isArray(generation.characters) ? generation.characters : [];
+  const negativeCharacters = Array.isArray(generation.negativeCharacters) ? generation.negativeCharacters : [];
+  for (let index = 0; index < Math.max(characters.length, negativeCharacters.length); index++) {
+    const prompt = characterPromptCaption(characters[index]);
+    const negativePrompt = characterPromptCaption(negativeCharacters[index]);
+    if (prompt) positive.push({ label: `角色 ${index + 1} · 正向`, prompt });
+    if (negativePrompt) negative.push({ label: `角色 ${index + 1} · 负向`, prompt: negativePrompt });
+  }
+  return { positive, negative };
+}
+
+function collectPromptArtists(generation, catalog, negative = false) {
+  const output = new Map();
+  const sources = promptArtistSources(generation)[negative ? 'negative' : 'positive'];
+  for (const source of sources) {
+    for (const tag of extractPromptTags(source.prompt)) {
+      const candidates = catalog.index.get(tag.key) || [];
+      if (!tag.explicit && !candidates.length) continue;
+      if (!output.has(tag.key)) {
+        output.set(tag.key, {
+          key: tag.key, name: tag.name, explicit: tag.explicit,
+          candidates, sources: new Set(), originals: new Set(),
+        });
+      }
+      const item = output.get(tag.key);
+      item.explicit ||= tag.explicit;
+      item.sources.add(source.label);
+      item.originals.add(tag.original);
+    }
+  }
+  return output;
+}
+
+function artistModelSeries(value) {
+  const text = String(value ?? '');
+  if (/V5/i.test(text)) return 'V5';
+  if (/V4\.5/i.test(text)) return 'V4.5';
+  return '';
+}
+
+function preferredArtistRecord(candidates, targetModel) {
+  const kindRank = { imported: 3, korean: 2, nax: 1 };
+  return [...candidates].map((record, index) => {
+    const series = artistModelSeries(record.card.model);
+    return {
+      record, index,
+      score: (targetModel && series === targetModel ? 1000 : 0)
+        + (record.card.photos?.length ? 100 : 0)
+        + (kindRank[record.kind] || 0),
+    };
+  }).sort((left, right) => right.score - left.score || left.index - right.index)[0]?.record;
+}
+
+function promptArtistCatalogNote(catalog) {
+  const parts = [];
+  if (catalog.loading) parts.push('韩国目录读取中');
+  else {
+    const failure = catalog.koreanFailures.length ? `（${catalog.koreanFailures.join('、')}失败）` : '';
+    parts.push(`韩国 ${catalog.koreanReady}/${koreanPacks.length}${failure}`);
+  }
+  if (Array.isArray(state.online)) parts.push(`NAX ${catalog.naxCount} 位`);
+  else if (state.onlineTask) parts.push('NAX 读取中');
+  else parts.push('NAX 未加载');
+  if (Array.isArray(state.packRows)) parts.push(`导入 ${catalog.importedCount} 位`);
+  else if (state.importing) parts.push('导入目录读取中');
+  else parts.push('导入目录未加载');
+  return parts.join(' · ');
+}
+
+let promptArtistPanelSequence = 0;
+
+function promptArtistRow(item, catalog, targetModel, openSample, polarity, sampleState) {
+  const row = node('div', 'prompt-artist-row');
+  const header = node('div', 'pack-source');
+  const info = node('div');
+  info.append(node('strong', '', item.name));
+  if (item.candidates.length) {
+    const librarySources = [...new Set(item.candidates.map((record) =>
+      record.card.source || (record.kind === 'nax' ? 'NAX' : record.kind === 'imported' ? '已导入' : '韩国 V5')))];
+    info.append(node('small', '', `库内同名 · ${librarySources.join('；')}`));
+  } else {
+    info.append(node('small', '', '显式 artist: · 已保留，当前目录未精确命中'));
+  }
+  info.append(node('small', '', `来源：${[...item.sources].join('、')} · 原值：${[...item.originals].join(' / ')}`));
+  const controls = node('div', 'copy-fact');
+  controls.append(button('复制原标签', 'text-button', () => copy([...item.originals].join('\n'))));
+  const preferred = preferredArtistRecord(item.candidates, targetModel);
+  if (preferred) {
+    const sampleModel = preferred.card.model || '未标注';
+    const targetSeries = artistModelSeries(targetModel);
+    const sampleSeries = artistModelSeries(sampleModel);
+    info.append(node('small', '', `样图模型：${sampleModel}${targetSeries && sampleSeries && targetSeries !== sampleSeries ? `（当前 ${targetSeries}）` : ''}`));
+    const photos = Array.isArray(preferred.card.photos) ? preferred.card.photos : [];
+    if (photos.length) {
+      const stateKey = `${polarity}:${item.key}`;
+      const state = sampleState.get(stateKey) || { expanded: false, index: 0 };
+      if (!Number.isSafeInteger(state.index) || state.index < 0 || state.index >= photos.length) state.index = 0;
+      sampleState.set(stateKey, state);
+      const panel = node('div', 'artist-sample-panel');
+      panel.id = `artist-sample-${++promptArtistPanelSequence}`;
+      panel.hidden = true;
+      let loadRevision = 0;
+      let toggle;
+
+      function loadSample() {
+        const photo = photos[state.index];
+        const revision = ++loadRevision;
+        panel.hidden = false;
+        if (!photo?.url) {
+          panel.replaceChildren(node('p', 'resource-note', '样图加载失败：当前条目没有可用的图片地址。'));
+          return;
+        }
+        const frame = node('div', 'photo');
+        const status = node('div', 'artist-sample-status', '正在读取样图…');
+        status.setAttribute('role', 'status');
+        const image = node('img');
+        image.alt = `${item.name} · ${photo.label || `样图 ${state.index + 1}`}`;
+        image.hidden = true;
+        image.onload = () => {
+          if (revision !== loadRevision || panel.hidden) return;
+          image.hidden = false;
+          status.remove();
+        };
+        image.onerror = () => {
+          if (revision !== loadRevision || panel.hidden) return;
+          image.hidden = true;
+          status.replaceChildren(node('span', '', '样图加载失败。'),
+            button('重试', 'text-button', loadSample));
+        };
+        const position = node('span', '', `${state.index + 1} / ${photos.length} · ${photo.label || '样图'}`);
+        const previous = button('上一张', 'text-button', () => {
+          state.index = (state.index + photos.length - 1) % photos.length;
+          loadSample();
+        });
+        const next = button('下一张', 'text-button', () => {
+          state.index = (state.index + 1) % photos.length;
+          loadSample();
+        });
+        previous.disabled = next.disabled = photos.length < 2;
+        const nav = node('div', 'photo-nav artist-sample-nav');
+        nav.append(previous, position, next);
+        frame.append(status, image);
+        panel.replaceChildren(frame, nav);
+        image.src = photo.url;
+      }
+
+      toggle = button(state.expanded ? '收起样图' : '看样图', 'soft compact', () => {
+        state.expanded = !state.expanded;
+        panel.hidden = !state.expanded;
+        toggle.textContent = state.expanded ? '收起样图' : '看样图';
+        toggle.setAttribute('aria-expanded', String(state.expanded));
+        if (state.expanded) loadSample();
+        else loadRevision++;
+      });
+      toggle.setAttribute('aria-expanded', String(state.expanded));
+      toggle.setAttribute('aria-controls', panel.id);
+      controls.append(toggle);
+      if (state.expanded) loadSample();
+      header.append(info, controls);
+      row.append(header, panel);
+      return row;
+    }
+    controls.append(button('看详情', 'soft compact', () => openSample(preferred.card)));
+  }
+  header.append(info, controls);
+  row.append(header);
+  return row;
+}
+
+function renderPromptArtistUsage(generation, catalog, openSample, sampleState) {
+  const section = node('section', 'tool-section');
+  const title = node('h2', '', '画风库画师');
+  const used = collectPromptArtists(generation, catalog);
+  const negative = collectPromptArtists(generation, catalog, true);
+  title.append(node('span', 'muted', ` · 正向使用 ${used.size} 位`));
+  section.append(title,
+    node('p', 'resource-note', `${promptArtistCatalogNote(catalog)}。仅按完整标签精确识别；无前缀必须与库内规范化名称完全一致，不扫描自然语言。`));
+  const targetModel = artistModelSeries(novelAiModelLabel(
+    generation.parameters?.model || generation.parameters?.model_name, generation.parameters?.model_hash));
+  if (!used.size) {
+    section.append(node('p', 'detail-note', catalog.loading
+      ? '显式 artist 已可识别；无前缀画师会在目录读取完成后按同名匹配。'
+      : '没有识别到正向使用的库内画师。'));
+  } else {
+    for (const item of used.values()) {
+      section.append(promptArtistRow(item, catalog, targetModel, openSample, 'positive', sampleState));
+    }
+  }
+  if (negative.size) {
+    const details = node('details', 'metadata-details');
+    details.append(node('summary', '', `负向中出现 · ${negative.size} 位（不视为使用）`));
+    for (const item of negative.values()) {
+      details.append(promptArtistRow(item, catalog, targetModel, openSample, 'negative', sampleState));
+    }
+    section.append(details);
+  }
+  return section;
+}
+
+function showPromptImport(data, {
+  back = null, galleryItem = null, resourcePhoto = null, promptState = null, promptScroll = 0,
+} = {}) {
   const sample = Boolean(resourcePhoto);
   openScreen(sample ? '样图提示词与参数' : '原图提示词与参数', back);
   const revision = screenRevision;
+  const restored = promptState && typeof promptState === 'object' ? promptState : null;
+  const restoredScroll = Number.isFinite(promptScroll) ? Math.max(0, promptScroll) : 0;
   const libraryButton = button('存小预览到图库', 'soft compact', async () => {
     libraryButton.disabled = true;
     try {
@@ -1580,6 +2337,10 @@ function showPromptImport(data, { back = null, galleryItem = null, resourcePhoto
   const selection = node('div', 'prompt-selection');
   const content = node('div');
   const selected = {};
+  const artistSampleState = new Map();
+  const hasActual = Boolean(data.actualPrompt || data.actualNegativePrompt
+    || data.actualCharacters?.length || data.actualNegativeCharacters?.length);
+  selected.actual = hasActual && Boolean(restored?.actual);
   const groups = [
     ['positive', '正向提示词', Boolean(data.prompt || data.actualPrompt)],
     ['negative', '负向提示词', Boolean(data.negativePrompt || data.actualNegativePrompt)],
@@ -1588,14 +2349,25 @@ function showPromptImport(data, { back = null, galleryItem = null, resourcePhoto
     ['seed', '种子', data.parameters?.seed !== undefined],
   ];
   for (const [key, label, available] of groups) {
-    selected[key] = available;
+    selected[key] = available && (restored ? Boolean(restored[key]) : true);
     if (available) selection.append(checkOption(label, true, (checked) => { selected[key] = checked; renderFields(); }));
   }
-  if (data.actualPrompt || data.actualNegativePrompt || data.actualCharacters?.length || data.actualNegativeCharacters?.length) {
-    selection.append(checkOption('使用随机展开后的实际提示词', false, (checked) => { selected.actual = checked; renderFields(); }));
+  if (hasActual) {
+    selection.append(checkOption('使用随机展开后的实际提示词', selected.actual, (checked) => {
+      selected.actual = checked;
+      renderFields();
+    }));
   }
   if (selection.childElementCount) body.append(selection);
   body.append(content);
+  let artistCatalog = promptArtistCatalog([], { loading: true });
+  Promise.allSettled(koreanPacks.map(([id]) => loadKoreanCatalog(id))).then((results) => {
+    if (revision !== screenRevision) return;
+    const scroll = body.scrollTop;
+    artistCatalog = promptArtistCatalog(results);
+    renderFields();
+    body.scrollTop = scroll;
+  });
   const rawFields = Object.entries(data.metadata || {});
   if (rawFields.length || data.rawComment) {
     const details = node('details', 'metadata-details');
@@ -1607,9 +2379,24 @@ function showPromptImport(data, { back = null, galleryItem = null, resourcePhoto
     body.append(details);
   }
 
+  function showArtistSample(card) {
+    const scroll = body.scrollTop;
+    const stateForReturn = { ...selected };
+    showCard(card, 0, () => showPromptImport(data, {
+      back, galleryItem, resourcePhoto,
+      promptState: stateForReturn,
+      promptScroll: scroll,
+    }));
+  }
+
   function renderFields() {
+    const scroll = body.scrollTop;
     const generation = selectedGeneration(data, selected);
+    const recognized = selectedGeneration(data, {
+      positive: true, negative: true, characters: true, settings: true, actual: selected.actual,
+    });
     content.replaceChildren();
+    content.append(renderPromptArtistUsage(recognized, artistCatalog, showArtistSample, artistSampleState));
     addCopyablePrompt(content, '正向提示词', generation.prompt);
     addCopyablePrompt(content, '负向提示词', generation.negativePrompt);
     renderCharacterPrompts(content, generation.characters, generation.negativeCharacters);
@@ -1647,8 +2434,15 @@ function showPromptImport(data, { back = null, galleryItem = null, resourcePhoto
     });
     copySelection.disabled = save.disabled = !chosen;
     actions.append(copySelection, save);
+    body.scrollTop = scroll;
   }
   renderFields();
+  if (restoredScroll) {
+    body.scrollTop = restoredScroll;
+    requestAnimationFrame(() => {
+      if (revision === screenRevision) body.scrollTop = restoredScroll;
+    });
+  }
 }
 
 let updateOffer = null;
@@ -1688,7 +2482,7 @@ function showTools(initialUpdate) {
     const cacheStatus = node('p', 'detail-note', '正在读取缓存信息…');
     cacheStatus.setAttribute('aria-live', 'polite');
     const cacheLimit = options([['0', '关闭（0 MB）'], ['128', '128 MB'], ['256', '256 MB（默认）'],
-      ['512', '512 MB'], ['1024', '1024 MB']], '256');
+      ['512', '512 MB'], ['1024', '1024 MB'], ['2048', '2 GB'], ['4096', '4 GB']], '256');
     const cacheActions = node('div', 'tool-actions');
     const cacheClear = button('清除缓存', 'soft', () => runCacheAction(
       'clearPackCache', null, '在线图包缓存已清除'));
