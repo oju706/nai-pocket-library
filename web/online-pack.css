@@ -18,6 +18,7 @@
 .online-pack-results,
 .online-pack-detail {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
 }
 
@@ -88,11 +89,13 @@
 .online-pack-post-group h3 { margin: 3px 0 6px; color: var(--accent-ink); font-size: 14px; }
 .online-pack-post-group h3 button { padding: 0; text-align: left; font-size: inherit; }
 .online-pack-pagination { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.online-pack-detail-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; width: 100%; }
 .online-pack-export { width: 100%; display: grid; gap: 6px; }
 .online-pack-export-buttons { display: flex; gap: 8px; }
 
 @media (min-width: 560px) {
   .online-pack-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .online-pack-detail-actions { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 }
 
 .online-pack-columns-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }

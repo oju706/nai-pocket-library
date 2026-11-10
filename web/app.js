@@ -2044,32 +2044,53 @@ function addCopyablePrompt(container, label, value) {
 }
 
 function artistTagKey(value) {
-  return String(value ?? '').normalize('NFKC').trim().replace(/[_\s]+/g, ' ').toLocaleLowerCase();
+  return unescapeTagPunctuation(String(value ?? '').normalize('NFKC'))
+    .replace(/[_\s]+/g, ' ').replace(/ *([()]) */g, '$1').trim().toLocaleLowerCase();
 }
 
-function unescapeTagCommas(value) {
-  return String(value ?? '').replace(/\\,/g, ',');
+function unescapeTagPunctuation(value) {
+  return value.replace(/\\([\\(),])/g, '$1');
+}
+
+function promptQuoteEnd(text, start) {
+  const quote = text[start].normalize('NFKC');
+  for (let index = start + 1; index < text.length; index++) {
+    const character = text[index].normalize('NFKC');
+    if (character === '\\') {
+      index++;
+      continue;
+    }
+    if (character !== quote) continue;
+    let nextIndex = index + 1;
+    while (nextIndex < text.length && /\s/.test(text[nextIndex])) nextIndex++;
+    const next = (text[nextIndex] || '').normalize('NFKC');
+    if (!next || ',)]}:'.includes(next)) return index;
+    const previous = text[index - 1].normalize('NFKC');
+    if (/[\s,([{:]/.test(previous)) return -1;
+  }
+  return -1;
 }
 
 function splitPromptTags(value) {
   const parts = [];
   let start = 0;
   let depth = 0;
-  let quote = '';
   const text = String(value ?? '');
   for (let index = 0; index < text.length; index++) {
-    const character = text[index];
+    const character = text[index].normalize('NFKC');
     if (character === '\\') {
       index++;
       continue;
     }
-    if (quote) {
-      if (character === quote) quote = '';
-      continue;
-    }
     if (character === '"' || character === "'") {
-      quote = character;
-      continue;
+      const previous = (text[index - 1] || '').normalize('NFKC');
+      if (index === start || /[\s([{:]/.test(previous)) {
+        const end = promptQuoteEnd(text, index);
+        if (end !== -1) {
+          index = end;
+          continue;
+        }
+      }
     }
     if ('([{'.includes(character)) depth++;
     else if (')]}'.includes(character) && depth > 0) depth--;
@@ -2114,7 +2135,7 @@ function unwrapPromptTag(value) {
 }
 
 function visitPromptTag(value, original, weightedContext, output) {
-  let tag = String(value ?? '').trim();
+  let tag = String(value ?? '').normalize('NFKC').trim();
   if (!tag) return;
   tag = tag.replace(/^::\s*/, '').trim();
   tag = tag.replace(/\s*::\s*$/, '').trim();
@@ -2137,11 +2158,14 @@ function visitPromptTag(value, original, weightedContext, output) {
   }
   if (!tag) return;
   const explicit = /^artist\s*:\s*([\s\S]*)$/i.exec(tag);
-  const name = unescapeTagCommas((explicit ? explicit[1] : tag).trim()).trim();
+  let name = (explicit ? explicit[1] : tag).trim();
+  if ((name[0] === '"' || name[0] === "'") && promptQuoteEnd(name, 0) === name.length - 1) {
+    name = name.slice(1, -1).trim();
+  }
   if (!name) return;
   output.push({
     explicit: Boolean(explicit),
-    name,
+    name: unescapeTagPunctuation(name),
     key: artistTagKey(name),
     original: original || tag,
   });
@@ -2174,7 +2198,14 @@ function promptArtistCatalog(koreanResults = [], { loading = false } = {}) {
       const identity = [kind, card.id, card.title, card.source, card.model].join('\u0000');
       if (identities.has(identity)) continue;
       identities.add(identity);
-      records.push({ card, key, name, kind });
+      const keys = [key];
+      const explicitName = /^artist\s*:\s*([\s\S]+)$/i.exec(card.prompt || '')?.[1];
+      if (explicitName && explicitName !== name) {
+        const tags = extractPromptTags(card.prompt);
+        const tag = tags[0];
+        if (tags.length === 1 && tag.explicit && tag.key && tag.key !== key) keys.push(tag.key);
+      }
+      records.push({ card, keys, kind });
     }
   };
   if (loading) addCards(state.korean, 'korean');
@@ -2185,8 +2216,10 @@ function promptArtistCatalog(koreanResults = [], { loading = false } = {}) {
   addCards(state.online, 'nax');
   const index = new Map();
   for (const record of records) {
-    if (!index.has(record.key)) index.set(record.key, []);
-    index.get(record.key).push(record);
+    for (const key of record.keys) {
+      if (!index.has(key)) index.set(key, []);
+      index.get(key).push(record);
+    }
   }
   const failures = koreanResults
     .map((result, index) => result.status === 'rejected' ? koreanPacks[index]?.[1] : '')
@@ -2409,6 +2442,49 @@ function renderPromptArtistUsage(generation, catalog, openSample, sampleState) {
   return section;
 }
 
+const promptCoverBytes = 192 * 1024;
+
+function smallPromptPreview(value) {
+  return typeof value === 'string' && value.length <= promptCoverBytes * 4 / 3 + 'data:image/jpeg;base64,'.length
+    && /^data:image\/(?:jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(value);
+}
+
+async function promptFavoriteCover(preview, galleryItem, sampleImage) {
+  if (smallPromptPreview(preview)) return preview;
+  try {
+    if (galleryItem) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      try {
+        const response = await fetch(galleryImageUrl(galleryItem, true), { signal: controller.signal });
+        if (!response.ok) return null;
+        const blob = await response.blob();
+        if (blob.size > promptCoverBytes || !['image/jpeg', 'image/webp'].includes(blob.type)) return null;
+        return new Promise((resolve) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(smallPromptPreview(reader.result) ? reader.result : null);
+          reader.onerror = reader.onabort = () => resolve(null);
+          try { reader.readAsDataURL(blob); } catch { resolve(null); }
+        });
+      } finally { clearTimeout(timeout); }
+    }
+    if (!sampleImage?.naturalWidth || !sampleImage.naturalHeight) return null;
+    const scale = Math.min(1, 384 / Math.max(sampleImage.naturalWidth, sampleImage.naturalHeight));
+    const canvas = node('canvas');
+    canvas.width = Math.max(1, Math.round(sampleImage.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(sampleImage.naturalHeight * scale));
+    const context = canvas.getContext('2d', { alpha: false });
+    if (!context) return null;
+    context.fillStyle = '#fff';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(sampleImage, 0, 0, canvas.width, canvas.height);
+    const cover = canvas.toDataURL('image/jpeg', .8);
+    return smallPromptPreview(cover) ? cover : null;
+  } catch {
+    return null;
+  }
+}
+
 function showPromptImport(data, {
   back = null, galleryItem = null, resourcePhoto = null, promptState = null, promptScroll = 0,
 } = {}) {
@@ -2446,7 +2522,7 @@ function showPromptImport(data, {
       ? '生成信息已在本机保存。'
       : '此次结果未能存入图库。可使用「收藏所选」长期保留需要的内容。'));
   }
-  if (data.preview && /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(data.preview)) {
+  if (!resourcePhoto?.preview && smallPromptPreview(data.preview)) {
     const preview = node('img', 'original-preview');
     preview.src = data.preview;
     preview.alt = '所选原图预览';
@@ -2460,6 +2536,7 @@ function showPromptImport(data, {
   const content = node('div');
   const selected = {};
   const artistSampleState = new Map();
+  let preparingFavorite = false;
   const hasActual = Boolean(data.actualPrompt || data.actualNegativePrompt
     || data.actualCharacters?.length || data.actualNegativeCharacters?.length);
   selected.actual = hasActual && Boolean(restored?.actual);
@@ -2525,7 +2602,10 @@ function showPromptImport(data, {
     const params = selectedGeneration(data, { settings: true, seed: true }).parameters;
     if (data.model && params.model == null) params.model = data.model;
     const settings = node('section', 'tool-section');
-    settings.append(node('h2', '', '生成参数'));
+    const parameterHeading = node('div', 'online-pack-heading');
+    parameterHeading.append(node('h2', '', '生成参数'));
+    if (Object.keys(params).length) parameterHeading.append(button('复制全部生成参数', 'soft compact', () => copy(params)));
+    settings.append(parameterHeading);
     const facts = node('dl', 'metadata-facts');
     const model = novelAiModelLabel(params.model || params.model_name, params.model_hash);
     appendCopyFact(facts, '模型', model);
@@ -2538,23 +2618,30 @@ function showPromptImport(data, {
         ['sampler', 'steps'].includes(key) ? '原图未记录' : undefined, true);
     }
     settings.append(facts);
-    if (Object.keys(params).length) settings.append(button('复制全部生成参数', 'soft compact', () => copy(params)));
     content.append(settings);
     const json = JSON.stringify(generation, null, 2);
     const chosen = groups.some(([key]) => selected[key]);
     actions.replaceChildren(button(galleryItem ? '返回原图' : sample ? '返回样图' : '另选原图', 'soft',
       back || (sample ? closeScreen : readImagePrompts)));
     const copySelection = button('复制所选', 'soft', () => copy(json));
-    const save = button('收藏所选', 'primary', () => {
+    const save = button(preparingFavorite ? '正在准备封面…' : '收藏所选', 'primary', async () => {
+      if (preparingFavorite) return;
       if (new Blob([json]).size > 2 * 1024 * 1024 || generation.prompt.length > 16000) { toast('所选信息超过收藏上限，请保留原图。'); return; }
       const note = generation.negativePrompt && generation.negativePrompt.length < 7900
         ? '负向提示词：\n' + generation.negativePrompt : '已附带所选生成信息。';
       const source = resourcePhoto || {};
+      preparingFavorite = true;
+      save.disabled = true;
+      save.textContent = '正在准备封面…';
+      const cover = await promptFavoriteCover(data.preview, galleryItem, source.preview);
+      if (revision !== screenRevision) return;
       showEditor({ section: 'knowledge', kind: 'general', title: sample ? '样图生成信息' : '原图生成信息',
-        prompt: generation.prompt, note, photos: [], generation: json,
+        prompt: generation.prompt, note, photos: cover ? [{ url: cover, label: '图片预览' }] : [], generation: json,
         source: source.source, sourceUrl: source.sourceUrl });
+      if (!cover) toast('小预览暂不可用，可在编辑页选择配图。');
     });
-    copySelection.disabled = save.disabled = !chosen;
+    copySelection.disabled = !chosen;
+    save.disabled = !chosen || preparingFavorite;
     actions.append(copySelection, save);
     body.scrollTop = scroll;
   }

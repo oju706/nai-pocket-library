@@ -195,6 +195,7 @@
 
 .nai-gallery-is-natural {
   display: block;
+  justify-items: start;
   max-height: 68vh;
   min-height: 0;
 }

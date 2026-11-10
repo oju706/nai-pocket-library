@@ -350,7 +350,9 @@
       }
       body.append(view);
       showImage(showOriginal);
-      actions.append(save, metadata, saveToGallery, exportHtml);
+      const detailActions = node('div', 'online-pack-detail-actions');
+      detailActions.append(metadata, save, saveToGallery, exportHtml);
+      actions.append(detailActions);
       bindSaveState(() => {
         save.disabled = saving || gallerySaving;
         save.textContent = saving ? '准备保存…' : saveLabel;
@@ -453,7 +455,7 @@
       const forgetZip = button('移除图包', 'soft compact', () => {
         if (confirm('移除 App 中的共享图包？手机原 ZIP 文件会保留。')) return loadShared('forgetSharedStylePack');
       });
-      const retry = button(`重试读取${presetMode ? packLabel : '在线图包'}`, 'primary compact', () => loadCatalog(address, true));
+      const retry = button(presetMode ? '重试读取图包' : '重试读取在线图包', 'primary compact', () => loadCatalog(address, true));
       retry.hidden = true;
       if (shared) {
         const tools = node('div', 'online-pack-heading');

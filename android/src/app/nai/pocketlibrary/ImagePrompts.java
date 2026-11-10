@@ -55,6 +55,7 @@ final class ImagePrompts {
 
     interface Result { void complete(int id, Object value, String error); }
     private interface ImageInput { InputStream open() throws IOException; }
+    private enum PreviewMode { NONE, SAMPLE, PICKED_ORIGINAL }
 
     private final Activity activity;
     private final Result result;
@@ -96,17 +97,17 @@ final class ImagePrompts {
     }
 
     void readGallery(int id, File file, Result destination) {
-        if (begin(id, destination)) inspect(() -> new FileInputStream(file), false, destination);
+        if (begin(id, destination)) inspect(() -> new FileInputStream(file), PreviewMode.NONE, destination);
     }
 
     void readGallery(int id, Uri uri, Result destination) {
         if (begin(id, destination)) {
-            inspect(() -> activity.getContentResolver().openInputStream(uri), false, destination);
+            inspect(() -> activity.getContentResolver().openInputStream(uri), PreviewMode.NONE, destination);
         }
     }
 
     void readPhoto(int id, byte[] bytes) {
-        if (begin(id, result)) inspect(() -> new ByteArrayInputStream(bytes), false, result);
+        if (begin(id, result)) inspect(() -> new ByteArrayInputStream(bytes), PreviewMode.SAMPLE, result);
     }
 
     boolean handleActivityResult(int code, int response, Intent data) {
@@ -123,11 +124,11 @@ final class ImagePrompts {
         }
         lastOriginal = uri;
         lastSummary = null;
-        inspect(() -> activity.getContentResolver().openInputStream(uri), true, result);
+        inspect(() -> activity.getContentResolver().openInputStream(uri), PreviewMode.PICKED_ORIGINAL, result);
         return true;
     }
 
-    private void inspect(ImageInput source, boolean includePreview, Result destination) {
+    private void inspect(ImageInput source, PreviewMode previewMode, Result destination) {
         worker.execute(() -> {
             try (InputStream input = source.open()) {
                 if (input == null) throw new IOException("无法读取这张原图。");
@@ -159,12 +160,15 @@ final class ImagePrompts {
                         summary.put("alphaReadError", reason);
                     }
                 }
-                if (includePreview) {
-                    String preview = readPreview(source, image);
-                    if (preview != null) summary.put("preview", preview);
-                }
                 if (summary.toString().length() > 3 * MAX_FIELD) throw new IOException("这张图的生成信息过大，无法在预览页完整显示。");
-                if (includePreview) lastSummary = summary;
+                if (previewMode != PreviewMode.NONE) {
+                    String preview = readPreview(source, image);
+                    if (preview != null) {
+                        summary.put("preview", preview);
+                        if (summary.toString().length() > 3 * MAX_FIELD) summary.remove("preview");
+                    }
+                }
+                if (previewMode == PreviewMode.PICKED_ORIGINAL) lastSummary = summary;
                 finish(destination, summary, null);
             } catch (Exception failure) {
                 finish(destination, null, failure instanceof IOException && failure.getMessage() != null
