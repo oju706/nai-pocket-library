@@ -58,6 +58,7 @@ public final class MainActivity extends Activity {
     private final ExecutorService files = Executors.newSingleThreadExecutor();
     private final ExecutorService updateChecks = Executors.newSingleThreadExecutor();
     private OnlinePacks onlinePacks;
+    private TagGallery tagGallery;
     private PackPhotoCache photoCache;
     private SharedPreferences packCacheSettings;
     private int picker;
@@ -91,6 +92,7 @@ public final class MainActivity extends Activity {
         photoCache = new PackPhotoCache(new File(getCacheDir(), "online-pack-images"),
                 packCacheSettings.getInt(PACK_CACHE_LIMIT, DEFAULT_PACK_CACHE_LIMIT));
         onlinePacks = new OnlinePacks(photoCache);
+        tagGallery = new TagGallery(this);
         sharedStyles = new SharedStylePacks(this, photoCache);
         files.execute(() -> {
             OnlinePacks.clearExpiredExports(getCacheDir());
@@ -157,6 +159,11 @@ public final class MainActivity extends Activity {
             if ("/gallery.js".equals(path)) return response("text/javascript", getAssets().open("gallery.js"), false);
             if ("/online-pack.js".equals(path)) return response("text/javascript", getAssets().open("online-pack.js"), false);
             if ("/online-pack.css".equals(path)) return response("text/css", getAssets().open("online-pack.css"), false);
+            if ("/tag-gallery.js".equals(path)) return response("text/javascript", getAssets().open("tag-gallery.js"), false);
+            if ("/tag-gallery.css".equals(path)) return response("text/css", getAssets().open("tag-gallery.css"), false);
+            if ("/api/tag-gallery/posts".equals(path) || "/api/tag-gallery/tags".equals(path)) {
+                return tagGallerySearch(url, path.endsWith("/posts"));
+            }
             if ("/api/gallery-packs.json".equals(path)) {
                 byte[] index = onlinePacks.galleryIndex().toString()
                         .getBytes(java.nio.charset.StandardCharsets.UTF_8);
@@ -177,6 +184,10 @@ public final class MainActivity extends Activity {
                 return new WebResourceResponse("application/json", "UTF-8", 200, "OK", headers, catalog.data);
             }
             List<String> parts = url.getPathSegments();
+            if (parts.size() == 2 && TagGallery.IMAGE_ROUTE.equals(parts.get(0))) {
+                byte[] bytes = tagGallery.image(parts.get(1));
+                return response(NaxLibrary.imageType(bytes), new ByteArrayInputStream(bytes), false);
+            }
             if (parts.size() == 2 && "gallery-image".equals(parts.get(0))) {
                 GalleryStore.Entry image = gallery.entry(parts.get(1));
                 if ("1".equals(url.getQueryParameter("thumb")) || "1".equals(url.getQueryParameter("preview"))) {
@@ -194,6 +205,30 @@ public final class MainActivity extends Activity {
             return unavailable();
         }
         return unavailable();
+    }
+
+    private WebResourceResponse tagGallerySearch(Uri url, boolean posts) {
+        int status = 200;
+        JSONObject payload;
+        try {
+            payload = posts ? tagGallery.posts(url) : tagGallery.tags(url);
+        } catch (TagGallery.Failure failure) {
+            status = failure.status;
+            payload = tagGalleryError(failure.code, failure.getMessage());
+        } catch (IOException | JSONException failure) {
+            status = 502;
+            payload = tagGalleryError("unavailable", "站点暂时没有返回可用的数据，请重试或打开官网。");
+        }
+        return new WebResourceResponse("application/json", "UTF-8", status, status == 200 ? "OK" : "Unavailable",
+                Collections.singletonMap("Cache-Control", "no-store"), new ByteArrayInputStream(
+                        payload.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+    }
+
+    private static JSONObject tagGalleryError(String code, String message) {
+        HashMap<String, String> fields = new HashMap<>();
+        fields.put("error", message);
+        fields.put("code", code);
+        return new JSONObject(fields);
     }
 
     private WebResourceResponse libraryPhoto(List<String> parts) throws IOException, JSONException {
@@ -455,6 +490,19 @@ public final class MainActivity extends Activity {
                         }
                     });
                     return;
+                case "tagGalleryCredentialStatus":
+                case "saveTagGalleryCredentials":
+                    files.execute(() -> tagGalleryCredentials(id, action, value));
+                    return;
+                case "openTagGalleryWebsite":
+                    Uri siteUrl = Uri.parse(value);
+                    if (!TagWebsiteActivity.allows(siteUrl)) {
+                        send(id, null, "只支持打开 Danbooru 或 Gelbooru 官网。");
+                        return;
+                    }
+                    startActivity(new Intent(this, TagWebsiteActivity.class).putExtra(TagWebsiteActivity.EXTRA_URL, value));
+                    send(id, true, null);
+                    return;
                 case "openLink":
                     Uri uri = Uri.parse(value);
                     if (!"https".equals(uri.getScheme()) || !Arrays.asList("arca.live", "nax.moe", "gall.dcinside.com",
@@ -473,6 +521,22 @@ public final class MainActivity extends Activity {
             send(id, null, failure.getMessage() == null ? "输入内容无效。" : failure.getMessage());
         } catch (RuntimeException failure) {
             send(id, null, "无法完成操作，请重试。");
+        }
+    }
+
+    private void tagGalleryCredentials(int id, String action, String value) {
+        try {
+            Object result;
+            if ("saveTagGalleryCredentials".equals(action)) {
+                tagGallery.saveCredentials(value);
+                result = true;
+            } else result = tagGallery.credentialStatus(value);
+            runOnUiThread(() -> send(id, result, null));
+        } catch (IOException failure) {
+            String message = failure.getMessage();
+            runOnUiThread(() -> send(id, null, message == null ? "图库连接暂时不可用。" : message));
+        } catch (JSONException | RuntimeException failure) {
+            runOnUiThread(() -> send(id, null, "图库连接暂时不可用。"));
         }
     }
 

@@ -1,17 +1,17 @@
 [
   {
     "Name": "NAI-Pocket-Library.apk",
-    "Bytes": 1144069,
-    "SHA256": "e2c71fcf0b8f03c846503f81f101d7ef215f65f7bad35bb2c277d4080ca31776"
+    "Bytes": 1172876,
+    "SHA256": "0da95414d9bd81a07a929924bd0657b1364a8ab18fb21858cb526da6a55ed876"
   },
   {
     "Name": "NAI-Pocket-Library-source.zip",
-    "Bytes": 1150414,
-    "SHA256": "dd1bc7795d5aec9636f82eee7e18d283ac2f194427796998e6204ab05406fa8f"
+    "Bytes": 1178990,
+    "SHA256": "dc59b6676f076d5dae288810c217c0609018699fbcbac10412bedbcef9304379"
   },
   {
     "Name": "update.json",
-    "Bytes": 332,
-    "SHA256": "f0a25ed12392ce4f79aadf6bd1420c8dc3603d53c8ac9dcc777263ca3f54b6c2"
+    "Bytes": 397,
+    "SHA256": "7b54060da8ff373a55b014fa448f3cb9931fd3c66b89f604da5080bf453aac78"
   }
 ]

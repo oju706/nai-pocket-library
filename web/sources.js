@@ -180,8 +180,21 @@ const PocketSources = (() => {
     return url.href;
   }
 
+  function tagGalleryWebsiteUrl(id, query, rating = 'general', sort = 'newest') {
+    const gallery = tagGalleries.find((item) => item.id === id);
+    if (!gallery) return '';
+    const terms = String(query ?? '').trim().split(/\s+/)
+      .filter((term) => term && !/^[-~]?(?:rating|order|sort):/i.test(term));
+    if (['general', 'sensitive', 'questionable', 'explicit'].includes(rating)) terms.push(`rating:${rating}`);
+    if (sort === 'popular') terms.push(id === 'danbooru' ? 'order:score' : 'sort:score:desc');
+    const url = new URL(gallery.search);
+    const tags = terms.join(' ') || gallery.defaultTag;
+    if (tags) url.searchParams.set('tags', tags);
+    return url.href;
+  }
+
   return {
     onlineCards, koreanCards, packCards, knowledge, references, knowledgeKinds,
-    tagGalleries, tagGalleryTag, tagGallerySearchUrl, nax, arca,
+    tagGalleries, tagGalleryTag, tagGallerySearchUrl, tagGalleryWebsiteUrl, nax, arca,
   };
 })();

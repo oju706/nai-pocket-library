@@ -4,7 +4,15 @@
 
 中文安卓 App，用于浏览、收藏和复制 NovelAI 标签与画面提示词。安装 APK 后，手机桌面会出现「NAI 口袋词库」。适用 Android 9 或更新版本，使用系统提供的 Android WebView。
 
-在「图库 → 外站找图」可按标签打开 Danbooru 或 Gelbooru。画师和角色详情也可用当前标签直接搜索。来源选择参考 [NAI Launcher v4.3.1](https://github.com/Aaalice233/Aaalice_NAI_Launcher/releases/tag/v4.3.1)。
+在「图库 → 外站找图」选择 Danbooru 或 Gelbooru，可在 App 内按标签搜索、看图、翻页和复制标签。输入部分标签可选候选，搜索也支持 `*`。画师和角色详情可以带着当前标签打开图库。
+
+「在 App 内打开官网」会在独立的网页页签保留站点自己的搜索、登录和浏览方式。Gelbooru 的图库接口需要用户 ID 和 API Key，直接打开官网可使用站点自己的访问方式。来源选择参考 [NAI Launcher v4.3.1](https://github.com/Aaalice233/Aaalice_NAI_Launcher/releases/tag/v4.3.1)。
+
+## 1.3.17
+
+- D 站和 G 站的搜索结果直接加载缩略图，点开可看大图和标签。
+- D 站按原站顺序显示「画师、作品、角色、通用、元数据」。每个标签都可单独复制原词，在「更多」里可继续搜图或打开标签 Wiki。 [D 站标签说明](https://safebooru.donmai.us/wiki_pages/help:tags)
+- D 站标签可带入画师库、角色库、画面提示词知识和提示词工具。画师可加入画风串，画风串和原图正向提示词也可带词回图库搜图。从词库返回可继续浏览原图和原来的列表位置。
 
 ## 1.3.16
 
@@ -88,7 +96,7 @@
 
 ## 构建与发布
 
-当前版本为 1.3.16（versionCode 20），包名为 `app.nai.pocketlibrary`。构建使用 Windows 上的 PowerShell、JDK 17、Android SDK Platform 35 和 Build Tools 35.0.0。
+当前版本为 1.3.17（versionCode 21），包名为 `app.nai.pocketlibrary`。构建使用 Windows 上的 PowerShell、JDK 17、Android SDK Platform 35 和 Build Tools 35.0.0。
 
 脚本使用下面的便携工具目录。可用 `-ToolCache` 指定目录位置。
 

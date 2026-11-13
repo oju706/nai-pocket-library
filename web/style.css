@@ -360,6 +360,19 @@ h2 { font-size: 19px; line-height: 1.35; margin: 0; }
 .tag-gallery-search { margin: 12px 0; }
 .tag-gallery-search h3 { margin: 0 0 6px; font-size: 14px; }
 .tag-gallery-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.reference-tag-panel { display: grid; gap: 9px; min-width: 0; margin-top: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 13px; background: var(--paper); }
+.reference-tag-panel h3 { margin: 0; font-size: 15px; }
+.reference-tag-panel > p { margin: 0; }
+.reference-tag-list { display: grid; gap: 7px; min-width: 0; }
+.reference-tag-row { display: grid; gap: 7px; min-width: 0; padding: 8px; border-radius: 10px; background: var(--surface); }
+.reference-tag-choice { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; min-width: 0; }
+.reference-tag-choice input { width: 20px; height: 20px; flex: none; accent-color: var(--accent); }
+.reference-tag-name { min-width: 0; overflow-wrap: anywhere; font-size: 13px; font-weight: 700; }
+.reference-tag-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(104px, 1fr)); gap: 5px; min-width: 0; }
+.reference-tag-actions button { min-width: 0; min-height: 42px; padding-inline: 7px; white-space: normal; }
+.nai-gallery-thumb-image { opacity: 0; transition: opacity .16s ease; }
+.nai-gallery-thumb-image.is-loaded { opacity: 1; }
+.artist-chain-gallery-button { margin-left: auto; }
 .tool-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
 .update-result { font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
 .update-result > button { margin-right: 8px; }
@@ -382,6 +395,8 @@ h2 { font-size: 19px; line-height: 1.35; margin: 0; }
   .artist-filter-grid { padding: 10px; }
   .artist-chain-add { grid-template-columns: minmax(0, 1fr); }
   .artist-chain-add .primary { width: 100%; }
+  .reference-tag-actions { grid-template-columns: minmax(0, 1fr); }
+  .artist-chain-gallery-button { width: 100%; margin-left: 0; }
 }
 @media (min-width: 560px) {
   main { padding-inline: 26px; }

@@ -34,6 +34,7 @@ const state = {
   artistPostBand: 'all', koreanPostBands: [],
   characterFilters: {},
   koreanPack: 'all', korean: null, koreanTask: null, koreanError: false, koreanChecking: false, koreanStatus: '',
+  tagGalleryReturn: null,
 };
 const koreanPacks = [['curated', 'Curated 精选'], ['33000', '33000-Q'], ['55000', '55000-Q']];
 const koreanCatalogs = new Map();
@@ -739,35 +740,186 @@ function openLink(url) {
   else window.open(url, '_blank', 'noopener,noreferrer');
 }
 
-function tagGalleryButtons(getTag) {
+function openTagGalleryWebsite(url) {
+  if (window.Pocket) return native('openTagGalleryWebsite', url).catch((error) => toast(error.message));
+  openLink(url);
+}
+
+function tagGalleryButtons(getTag, back = null) {
   const links = node('div', 'tag-gallery-actions');
   for (const gallery of PocketSources.tagGalleries) {
-    links.append(button(`${gallery.label} ↗`, 'soft compact', () => {
-      openLink(PocketSources.tagGallerySearchUrl(gallery.id, getTag()));
+    links.append(button(`${gallery.label} 图库`, 'soft compact', () => {
+      showTagGalleries(getTag(), back, gallery.id);
     }));
   }
   return links;
 }
 
-function showTagGalleries(initialTag = '', back = null) {
+function showTagGalleries(initialTag = '', back = null, initialSite = 'danbooru') {
+  if (typeof window.showInAppTagGallery === 'function') {
+    window.showInAppTagGallery(initialTag, back, initialSite);
+    return;
+  }
+  if (!window.Pocket) {
+    openLink(PocketSources.tagGallerySearchUrl(initialSite, initialTag));
+    return;
+  }
   openScreen('外站找图', back);
-  const input = textInput('input', '', '例如 yyy_(zelda10010)', 512);
-  input.value = initialTag;
-  input.autocapitalize = 'none';
-  input.autocomplete = 'off';
-  input.spellcheck = false;
-  const section = toolSection('按标签搜索', '选一个图站，在浏览器查看结果。留空可打开帖子列表。');
-  section.append(field('一个完整的画师或角色标签', input), tagGalleryButtons(() => input.value));
+  body.append(toolSection('图库模块未载入', '请重新打开 App 后再试。'));
 }
 
-function appendTagGalleryActions(target, card) {
-  if (!['artist', 'character'].includes(card.section)) return;
-  const value = card.section === 'artist' ? artistChainCardTag(card) || artistCardTag(card)
-    : card.local ? card.title : card.prompt || card.title;
+const tagGalleryKindMap = Object.freeze({
+  artist: { key: 'artist', label: '画师', section: 'artist' },
+  character: { key: 'character', label: '角色', section: 'character' },
+  copyright: { key: 'copyright', label: '作品', section: 'character' },
+  series: { key: 'copyright', label: '作品', section: 'character' },
+  general: { key: 'general', label: '通用', section: 'knowledge' },
+  meta: { key: 'meta', label: '元数据', section: 'knowledge' },
+  metadata: { key: 'meta', label: '元数据', section: 'knowledge' },
+  '0': { key: 'general', label: '通用', section: 'knowledge' },
+  '1': { key: 'artist', label: '画师', section: 'artist' },
+  '3': { key: 'copyright', label: '作品', section: 'character' },
+  '4': { key: 'character', label: '角色', section: 'character' },
+  '5': { key: 'meta', label: '元数据', section: 'knowledge' },
+  画师: { key: 'artist', label: '画师', section: 'artist' },
+  作品: { key: 'copyright', label: '作品', section: 'character' },
+  角色: { key: 'character', label: '角色', section: 'character' },
+  通用: { key: 'general', label: '通用', section: 'knowledge' },
+  元数据: { key: 'meta', label: '元数据', section: 'knowledge' },
+});
+
+function tagGalleryKindInfo(value) {
+  const raw = String(value ?? '').normalize('NFKC').trim();
+  const key = raw.toLocaleLowerCase();
+  return Object.hasOwn(tagGalleryKindMap, key) ? tagGalleryKindMap[key] : {
+    key: `unknown:${key || 'blank'}`,
+    label: raw || '未分类',
+    raw,
+    section: '',
+  };
+}
+
+function tagGalleryReferenceTags(value, kind = 'general') {
+  const source = Array.isArray(value) ? value.join(', ') : String(value ?? '');
+  const parsed = extractPromptTags(source)
+    .map((tag) => tag.name.trim())
+    .filter(Boolean);
+  const names = parsed.length ? parsed : [PocketSources.tagGalleryTag(source)].filter(Boolean);
+  return [...new Set(names)].map((name) => ({ name, kind }));
+}
+
+function parsedPromptReferenceTags(value) {
+  const names = extractPromptTags(String(value ?? ''))
+    .map((tag) => tag.name.trim())
+    .filter(Boolean);
+  return [...new Set(names)].map((name) => ({ name, kind: '' }));
+}
+
+function tagGalleryReferenceData(tags, source = '') {
+  return {
+    found: false,
+    metadataType: '图站参考标签',
+    message: '这些是图站的关联标签，不是原图的生成提示词。',
+    referenceTags: tags,
+    referenceSource: source,
+    metadata: {},
+  };
+}
+
+function openTagGalleryReferenceTool(tags, source = '', back = null, initialSite = 'danbooru') {
+  const normalized = (Array.isArray(tags) ? tags : [tags])
+    .map((tag) => typeof tag === 'string' ? { name: tag, kind: '' } : tag)
+    .filter((tag) => tag && String(tag.name || '').trim())
+    .map((tag) => ({ name: String(tag.name).trim(), kind: String(tag.kind || '').trim() }));
+  if (!normalized.length) return;
+  showPromptImport(tagGalleryReferenceData(normalized, source), {
+    back,
+    referenceTags: normalized,
+    referenceSource: source,
+    referenceSite: initialSite,
+    referenceSelected: normalized.slice(0, 1).map((tag) => tag.name),
+  });
+}
+
+function showManualTagEditor(name, section = 'knowledge') {
+  const value = String(name ?? '').normalize('NFKC').trim();
+  if (!value) return;
+  const target = ['artist', 'character', 'knowledge'].includes(section) ? section : 'knowledge';
   const tag = PocketSources.tagGalleryTag(value);
+  showEditor({
+    section: target,
+    kind: target === 'knowledge' ? 'general' : undefined,
+    title: tag || value,
+    prompt: target === 'artist' ? `artist:${tag || value}` : (tag || value),
+    note: '来自图站，尚未在现有资源库中自动匹配；请核实后再保存。',
+    model: '通用',
+  });
+}
+
+function searchTagGalleryInLibrary(tagValue, back = null, returnLabel = '返回图站/来源') {
+  const tag = typeof tagValue === 'string'
+    ? { name: tagValue, kind: '' } : (tagValue || {});
+  const name = String(tag.name ?? '').normalize('NFKC').trim();
+  if (!name) return;
+  const kind = tagGalleryKindInfo(tag.kind);
+  if (!kind.section) {
+    toast(`「${kind.label}」类别未映射，请手动选择词库分类。`);
+    showManualTagEditor(name);
+    return;
+  }
+  if (screen.open) closeScreen();
+  state.section = kind.section;
+  state.mode = 'online';
+  state.page = 0;
+  state.galleryFocus = false;
+  state.kind = 'all';
+  state.artistGroup = 'all';
+  state.artistPostBand = 'all';
+  state.artistShuffle = 0;
+  state.characterFilters = {};
+  if (kind.section === 'knowledge') state.knowledgeTab = 'basic';
+  if (kind.section === 'character' && !['V5', 'V4.5'].includes(state.model)) state.model = 'V5';
+  if (kind.section === 'artist' && state.artistSource === 'imported' && !state.packRows.length) {
+    state.artistSource = 'korean';
+  }
+  state.tagGalleryReturn = typeof back === 'function'
+    ? { back, label: returnLabel, section: kind.section, mode: 'online' }
+    : null;
+  query.value = name;
+  render();
+  main.scrollTop = 0;
+  toast(`已在${sections[kind.section].label}搜索「${name}」`);
+}
+
+window.searchTagGalleryInLibrary = searchTagGalleryInLibrary;
+window.openTagGalleryReferenceTool = openTagGalleryReferenceTool;
+window.showManualTagEditor = showManualTagEditor;
+
+function appendTagGalleryActions(target, card, back = null, photoIndex = 0) {
+  if (!['artist', 'character', 'knowledge'].includes(card.section)) return;
+  const value = card.section === 'artist' ? artistChainCardTag(card) || artistCardTag(card)
+    : card.section === 'knowledge' ? card.prompt || card.title
+      : card.local ? card.title : card.prompt || card.title;
+  const references = card.section === 'knowledge' ? tagGalleryReferenceTags(value) : [];
+  const tag = card.section === 'knowledge'
+    ? references.map((item) => PocketSources.tagGalleryTag(item.name)).filter(Boolean).join(' ')
+    : PocketSources.tagGalleryTag(value);
   if (!tag) return;
   const section = node('section', 'tag-gallery-search');
-  section.append(node('h3', '', '外站找图'), tagGalleryButtons(() => tag));
+  const backToCard = () => showCard(card, photoIndex, back);
+  if (card.section === 'knowledge') {
+    if (references.length === 1) {
+      section.append(node('h3', '', '在 App 内找图'), tagGalleryButtons(() => tag, backToCard));
+    } else {
+      section.append(
+        node('h3', '', '逐词选择后找图'),
+        button('选择参考标签并找图', 'soft compact', () =>
+          openTagGalleryReferenceTool(references, '画面提示词知识', backToCard)),
+      );
+    }
+  } else {
+    section.append(node('h3', '', '在 App 内找图'), tagGalleryButtons(() => tag, backToCard));
+  }
   target.append(section);
 }
 
@@ -1333,6 +1485,10 @@ function renderCharacterFilters(target) {
 }
 
 function render() {
+  if (state.tagGalleryReturn && (state.tagGalleryReturn.section !== state.section
+      || state.tagGalleryReturn.mode !== state.mode)) {
+    state.tagGalleryReturn = null;
+  }
   const current = sections[state.section];
   const artistBrowser = state.section === 'artist';
   main.classList.toggle('artist-browser', artistBrowser);
@@ -1554,6 +1710,19 @@ function renderList() {
   const resourceActions = byId('artist-resource-actions');
   resourceActions?.replaceChildren();
   results.replaceChildren();
+  if (state.tagGalleryReturn && (state.tagGalleryReturn.section !== state.section
+      || state.tagGalleryReturn.mode !== state.mode)) {
+    state.tagGalleryReturn = null;
+  }
+  if (state.tagGalleryReturn) {
+    const savedReturn = state.tagGalleryReturn;
+    const returnControl = button(savedReturn.label || '返回图站/来源', 'soft compact', () => {
+      if (state.tagGalleryReturn === savedReturn) state.tagGalleryReturn = null;
+      returnControl.remove();
+      savedReturn.back();
+    });
+    meta.append(returnControl);
+  }
   const personal = state.mode === 'personal';
   const knowledge = state.section === 'knowledge';
   const korean = isKorean();
@@ -1636,14 +1805,20 @@ function renderList() {
     state.page = 0;
     if (terms.length || state.artistGroup !== 'all' || postBand !== 'all' || (knowledge && state.kind !== 'all') ||
         (state.section === 'character' && Object.values(state.characterFilters).some(Boolean))) {
-      empty('没有匹配的条目', postBand === 'all' ? '换个名称分类，或试试更短的关键词。' : '试试其他作品数分档、名称分类或更短的关键词。', button('清除筛选', 'soft', () => {
+      const clear = button('清除筛选', 'soft', () => {
         state.artistGroup = 'all';
         if (korean) state.artistPostBand = 'all';
         state.artistShuffle = 0;
         state.kind = 'all';
         state.characterFilters = {};
         resetResults();
-      }));
+      });
+      const manual = terms.length
+        ? button('手动收藏此标签', 'soft', () => showManualTagEditor(query.value, state.section))
+        : null;
+      empty('没有匹配的条目',
+        postBand === 'all' ? '换个名称分类，或试试更短的关键词。' : '试试其他作品数分档、名称分类或更短的关键词。',
+        clear, ...(manual ? [manual] : []));
     }
     else if (personal) empty('从一条常用词开始', '保存后随时搜索、编辑或复制。', button('新增条目', 'soft', () => showEditor()), button('看看在线资源', 'subtle', () => chooseMode('online')));
     else empty('这里还没有条目', knowledge && remote ? '在线图鉴目前只有发型和表情；V5 暂无表情图库。可切换模型或进入中文知识查看其他分类。' : '可以切换分类，或重新导入已有数据包。');
@@ -1939,7 +2114,7 @@ function showCard(card, photoIndex = 0, back = null) {
   if (Number.isSafeInteger(card.postCount)) body.append(node('p', 'resource-note', `原库作品记录 ${number.format(card.postCount)} 条 · bequiet 的统计`));
   showPhotos(card, photoIndex, back);
   if (card.prompt) body.append(node('div', 'prompt', card.prompt));
-  appendTagGalleryActions(body, card);
+  appendTagGalleryActions(body, card, back, photoIndex);
   if (card.note) {
     body.append(node('p', 'detail-note', card.note));
     if (card.section === 'character') body.append(button('复制备注', 'text-button', () => copy(card.note)));
@@ -2774,7 +2949,7 @@ function addArtistCardsToChain(cards, draft, targetModel) {
 }
 
 function openArtistChainWorkbench({
-  back = null, defaultModel = null, initialArtists = [],
+  back = null, defaultModel = null, initialArtists = [], initialTag = '',
 } = {}) {
   openScreen('画风串工作台', back);
   document.querySelector('.screen-inner')?.classList.add('artist-chain-open');
@@ -2903,7 +3078,20 @@ function openArtistChainWorkbench({
 
   workbench.append(intro, modelControls, copiesSection, layout, comparison);
   body.append(workbench);
-  actions.append(copyButton);
+  const galleryButton = button('用当前画风串找图', 'soft', () => {
+    const value = draft.drafts[activeModel].filter((item) => !item.disabled)
+      .map((item) => PocketSources.tagGalleryTag(item.tag)).filter(Boolean).join(' ');
+    if (!value) {
+      toast('当前草稿没有启用的画师标签。');
+      return;
+    }
+    showTagGalleries(value, () => openArtistChainWorkbench({
+      back,
+      defaultModel: activeModel,
+    }));
+  });
+  galleryButton.classList.add('artist-chain-gallery-button');
+  actions.append(galleryButton, copyButton);
 
   function setFeedback(message, error = false) {
     feedback.textContent = message;
@@ -3273,6 +3461,7 @@ function openArtistChainWorkbench({
 
   renderCopyControls();
   renderDraft();
+  let pendingInitialTag = String(initialTag || '').normalize('NFKC').trim();
   function refreshArtistChoices() {
     if (revision !== screenRevision) return;
     catalog = promptArtistCatalog(koreanResults, { loading: catalogLoading, importedResults });
@@ -3280,6 +3469,18 @@ function openArtistChainWorkbench({
     add.disabled = false;
     catalogStatus.textContent = `已载入 ${number.format(catalog.index.size)} 个完整画师标签 · ${promptArtistCatalogNote(catalog)}。`;
     renderArtistChoices();
+    if (pendingInitialTag && !input.value.trim()) {
+      const result = enqueueArtistChainTag(draft, activeModel, pendingInitialTag, {
+        catalog, targetModel: activeModel, requireCatalog: true,
+      });
+      input.value = pendingInitialTag;
+      pendingInitialTag = '';
+      if (result.added) finishArtistAddition(result);
+      else {
+        setFeedback(result.error, true);
+        renderArtistChoices();
+      }
+    }
   }
   Promise.allSettled(koreanPacks.map(([id]) => loadKoreanCatalog(id))).then((results) => {
     koreanResults = results;
@@ -3290,6 +3491,11 @@ function openArtistChainWorkbench({
     catalogLoading = false;
     add.disabled = false;
     catalogStatus.textContent = '画师目录读取失败，暂时无法手动验证新标签。';
+    if (pendingInitialTag) {
+      input.value = pendingInitialTag;
+      pendingInitialTag = '';
+      setFeedback('图站画师标签已放入输入框；目录读取失败，请稍后手动校验。', true);
+    }
   });
   loadSavedNaxDirectory(revision)?.then(() => {
     if (state.online) refreshArtistChoices();
@@ -3809,9 +4015,17 @@ async function promptFavoriteCover(preview, galleryItem, sampleImage) {
 
 function showPromptImport(data, {
   back = null, galleryItem = null, resourcePhoto = null, promptState = null, promptScroll = 0,
+  referenceTags = [], referenceSource = '', referenceSite = 'danbooru', referenceSelected = [],
 } = {}) {
   const sample = Boolean(resourcePhoto);
-  openScreen(sample ? '样图提示词与参数' : '原图提示词与参数', back);
+  const references = (Array.isArray(referenceTags) ? referenceTags : [])
+    .map((tag) => typeof tag === 'string' ? { name: tag, kind: '' } : tag)
+    .filter((tag) => tag && String(tag.name || '').trim())
+    .map((tag) => ({ name: String(tag.name).trim(), kind: String(tag.kind || '').trim() }));
+  const selectedReferences = new Set((Array.isArray(referenceSelected) ? referenceSelected : [])
+    .map((value) => String(value).trim()).filter(Boolean));
+  openScreen(sample ? '样图提示词与参数'
+    : references.length && !data.found ? '图站参考标签' : '原图提示词与参数', back);
   const revision = screenRevision;
   const restored = promptState && typeof promptState === 'object' ? promptState : null;
   const restoredScroll = Number.isFinite(promptScroll) ? Math.max(0, promptScroll) : 0;
@@ -3851,7 +4065,7 @@ function showPromptImport(data, {
   const info = node('div', 'prompt-import-info');
   layout.append(media, info);
   body.append(layout);
-  if (!galleryItem && !sample) info.append(libraryButton);
+  if (!galleryItem && !sample && !references.length) info.append(libraryButton);
   if (sample) {
     const source = resourcePhoto;
     if (source.preview) {
@@ -3867,10 +4081,13 @@ function showPromptImport(data, {
       : '此次结果未能存入图库。可使用「收藏所选」长期保留需要的内容。'));
   }
   if (fallbackPreview) media.append(fallbackPreview);
-  const availablePrompt = data.found || data.actualPrompt || data.actualNegativePrompt
-    || data.actualCharacters?.length || data.actualNegativeCharacters?.length;
+  const hasGeneration = Boolean(data.found || data.actualPrompt || data.actualNegativePrompt
+    || data.actualCharacters?.length || data.actualNegativeCharacters?.length);
+  const availablePrompt = hasGeneration || references.length;
   if (!availablePrompt) info.append(node('p', 'detail-note', data.message || '未读到提示词。截图和转存可能清除生成信息。'));
-  info.append(node('p', 'resource-note', `${data.metadataType || '图片元数据'} · 可逐项复制，勾选控制「复制所选」。`));
+  info.append(node('p', 'resource-note', references.length
+    ? `${data.metadataType || '图站参考标签'} · 参考标签不是原图的生成提示词，也不会自动覆盖画风串草稿。`
+    : `${data.metadataType || '图片元数据'} · 可逐项复制，勾选控制「复制所选」。`));
   const selection = node('div', 'prompt-selection');
   const content = node('div');
   const artistMatches = node('div');
@@ -3975,39 +4192,121 @@ function showPromptImport(data, {
       recognized, artistCatalog, showArtistSample, artistSampleState, addRecognizedArtists));
   }
 
+  function promptReturnState() {
+    return {
+      ...selected,
+      references: references.filter((tag) => selectedReferences.has(tag.name)).map((tag) => tag.name),
+    };
+  }
+
+  function reopenPrompt(scroll = body.scrollTop) {
+    showPromptImport(data, {
+      back, galleryItem, resourcePhoto,
+      promptState: promptReturnState(),
+      promptScroll: scroll,
+      referenceTags: references,
+      referenceSource,
+      referenceSite,
+      referenceSelected: [...selectedReferences],
+    });
+  }
+
+  function renderReferences() {
+    if (!references.length) return;
+    const section = node('section', 'reference-tag-panel');
+    section.append(
+      node('h3', '', '参考标签'),
+      node('p', 'resource-note', `${referenceSource ? `${referenceSource} · ` : ''}请选择要带走的原始标签；不会当成原图生图提示词。`),
+    );
+    const list = node('div', 'reference-tag-list');
+    references.forEach((tag) => {
+      const kind = tagGalleryKindInfo(tag.kind);
+      const searchTag = PocketSources.tagGalleryTag(tag.name);
+      const row = node('div', 'reference-tag-row');
+      const choice = node('label', 'reference-tag-choice');
+      const checkbox = node('input');
+      checkbox.type = 'checkbox';
+      checkbox.checked = selectedReferences.has(tag.name);
+      checkbox.addEventListener('change', () => {
+        if (checkbox.checked) selectedReferences.add(tag.name);
+        else selectedReferences.delete(tag.name);
+        renderFields();
+      });
+      choice.append(checkbox, node('span', 'reference-tag-name', tag.name),
+        node('span', 'tag-gallery-tag-category', kind.label));
+      const controls = node('div', 'reference-tag-actions');
+      controls.append(
+        button('复制原标签', 'soft compact', () => copy(tag.name)),
+        button('用它搜图', 'soft compact', () => {
+          const scroll = body.scrollTop;
+          showTagGalleries(searchTag, () => reopenPrompt(scroll), referenceSite);
+        }),
+      );
+      if (kind.section) {
+        controls.append(button('在词库搜索', 'soft compact', () => {
+          const scroll = body.scrollTop;
+          searchTagGalleryInLibrary(tag, () => reopenPrompt(scroll), '返回参考标签');
+        }));
+      }
+      if (kind.section === 'artist') {
+        controls.append(button('加入画风串', 'soft compact', () => {
+          const scroll = body.scrollTop;
+          openArtistChainWorkbench({
+            defaultModel: null,
+            initialTag: tag.name,
+            back: () => reopenPrompt(scroll),
+          });
+        }));
+      }
+      row.append(choice, controls);
+      list.append(row);
+    });
+    section.append(list);
+    content.append(section);
+  }
+
   function renderFields() {
     const scroll = body.scrollTop;
     const generation = selectedGeneration(data, selected);
     content.replaceChildren(artistMatches);
     renderArtistMatches();
+    renderReferences();
     addCopyablePrompt(content, '正向提示词', generation.prompt);
     addCopyablePrompt(content, '负向提示词', generation.negativePrompt);
     renderCharacterPrompts(content, generation.characters, generation.negativeCharacters);
     const params = selectedGeneration(data, { settings: true, seed: true }).parameters;
     if (data.model && params.model == null) params.model = data.model;
-    const settings = node('section', 'tool-section');
-    const parameterHeading = node('div', 'online-pack-heading');
-    parameterHeading.append(node('h2', '', '生成参数'));
-    if (Object.keys(params).length) parameterHeading.append(button('复制全部生成参数', 'soft compact', () => copy(params)));
-    settings.append(parameterHeading);
-    const facts = node('dl', 'metadata-facts');
-    const model = novelAiModelLabel(params.model || params.model_name, params.model_hash);
-    appendCopyFact(facts, '模型', model);
-    for (const key of new Set(['sampler', 'steps', ...Object.keys(parameterLabels), ...Object.keys(params)])) {
-      if (key === 'model' && params.model === model) continue;
-      const label = key === 'model' ? '原始模型标识' :
-        Object.prototype.hasOwnProperty.call(parameterLabels, key) ? parameterLabels[key] : key;
-      appendCopyFact(facts, label,
-        Object.prototype.hasOwnProperty.call(params, key) ? params[key] : undefined,
-        ['sampler', 'steps'].includes(key) ? '原图未记录' : undefined, true);
+    if (hasGeneration) {
+      const settings = node('section', 'tool-section');
+      const parameterHeading = node('div', 'online-pack-heading');
+      parameterHeading.append(node('h2', '', '生成参数'));
+      if (Object.keys(params).length) parameterHeading.append(button('复制全部生成参数', 'soft compact', () => copy(params)));
+      settings.append(parameterHeading);
+      const facts = node('dl', 'metadata-facts');
+      const model = novelAiModelLabel(params.model || params.model_name, params.model_hash);
+      appendCopyFact(facts, '模型', model);
+      for (const key of new Set(['sampler', 'steps', ...Object.keys(parameterLabels), ...Object.keys(params)])) {
+        if (key === 'model' && params.model === model) continue;
+        const label = key === 'model' ? '原始模型标识' :
+          Object.prototype.hasOwnProperty.call(parameterLabels, key) ? parameterLabels[key] : key;
+        appendCopyFact(facts, label,
+          Object.prototype.hasOwnProperty.call(params, key) ? params[key] : undefined,
+          ['sampler', 'steps'].includes(key) ? '原图未记录' : undefined, true);
+      }
+      settings.append(facts);
+      content.append(settings);
     }
-    settings.append(facts);
-    content.append(settings);
     const json = JSON.stringify(generation, null, 2);
     const chosen = groups.some(([key]) => selected[key]);
-    actions.replaceChildren(button(galleryItem ? '返回原图' : sample ? '返回样图' : '另选原图', 'soft',
-      back || (sample ? closeScreen : readImagePrompts)));
-    const copySelection = button('复制所选', 'soft', () => copy(json));
+    const chosenReferences = references.filter((tag) => selectedReferences.has(tag.name));
+    const referenceOnly = references.length > 0 && !hasGeneration;
+    actions.replaceChildren(button(galleryItem ? '返回原图' : sample ? '返回样图'
+      : references.length ? '返回标签来源' : '另选原图', 'soft',
+      back || (sample || references.length ? closeScreen : readImagePrompts)));
+    const copySelection = button(hasGeneration ? '复制所选' : '复制所选参考标签', 'soft', () =>
+      copy(referenceOnly
+        ? chosenReferences.map((tag) => tag.name).join(' ')
+        : json));
     const save = button(preparingFavorite ? '正在准备封面…' : '收藏所选', 'primary', async () => {
       if (preparingFavorite) return;
       if (new Blob([json]).size > 2 * 1024 * 1024 || generation.prompt.length > 16000) { toast('所选信息超过收藏上限，请保留原图。'); return; }
@@ -4024,9 +4323,42 @@ function showPromptImport(data, {
         source: source.source, sourceUrl: source.sourceUrl });
       if (!cover) toast('小预览暂不可用，可在编辑页选择配图。');
     });
-    copySelection.disabled = !chosen;
+    copySelection.disabled = referenceOnly ? !chosenReferences.length : !chosen;
     save.disabled = !chosen || preparingFavorite;
-    actions.append(copySelection, save);
+    if (hasGeneration && !references.length) {
+      const positivePrompt = (selected.actual ? data.actualPrompt : data.prompt)
+        || data.prompt || data.actualPrompt || '';
+      const finderTags = parsedPromptReferenceTags(positivePrompt);
+      if (finderTags.length) {
+        actions.append(button('选取正向词找图', 'soft', () => {
+          const scroll = body.scrollTop;
+          const stateForReturn = { ...selected };
+          openTagGalleryReferenceTool(finderTags, '原图正向提示词', () => showPromptImport(data, {
+            back, galleryItem, resourcePhoto,
+            promptState: stateForReturn,
+            promptScroll: scroll,
+          }));
+        }));
+      }
+    }
+    if (references.length) {
+      const findImages = button('用勾选参考标签找图', 'soft', () => {
+        const value = chosenReferences
+          .map((tag) => PocketSources.tagGalleryTag(tag.name))
+          .filter(Boolean)
+          .join(' ');
+        if (!value) {
+          toast('请先勾选参考标签。');
+          return;
+        }
+        const scroll = body.scrollTop;
+        showTagGalleries(value, () => reopenPrompt(scroll), referenceSite);
+      });
+      findImages.disabled = !chosenReferences.length;
+      actions.append(findImages);
+    }
+    actions.append(copySelection);
+    if (hasGeneration) actions.append(save);
     body.scrollTop = scroll;
   }
   renderFields();
@@ -4066,6 +4398,15 @@ function showTools(initialUpdate) {
   openScreen('设置与工具');
   const image = toolSection('导入原图生成信息', '选择 NovelAI 保存的 PNG 或 WebP 原图，逐项复制提示词和生成参数。也可保存小预览和生成信息到图库。');
   image.append(button('选择原图', 'primary', readImagePrompts));
+  const tagGallery = toolSection('外站图库连接', '配置 App 内图库的 API 凭据。也可以从图库直接打开官网。');
+  if (window.Pocket) {
+    tagGallery.append(button('管理连接与凭据', 'soft', () => {
+      if (typeof window.showTagGalleryCredentials === 'function') window.showTagGalleryCredentials();
+      else toast('图库连接设置尚未载入，请重新打开 App。');
+    }));
+  } else {
+    tagGallery.append(node('p', 'detail-note', '浏览器预览不保存图库凭据，请在 Android App 中配置。'));
+  }
   const backup = toolSection('个人词库备份', '备份收藏、自己写的条目和自选配图。图库原图请单独保留，换机后可重新导入。');
   const backupActions = node('div', 'tool-actions');
   backupActions.append(button('导出备份', 'soft', exportBackup), button('从备份恢复', 'soft', importBackup));

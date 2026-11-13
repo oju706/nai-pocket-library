@@ -78,12 +78,14 @@ function galleryThumbnail(item, session) {
   image.alt = galleryItemAlt(item);
   image.loading = 'lazy';
   image.decoding = 'async';
+  image.classList.add('is-loading');
   image.addEventListener('load', () => {
-    image.hidden = false;
+    image.classList.remove('is-loading');
+    image.classList.add('is-loaded');
     status.hidden = true;
   });
   image.addEventListener('error', () => {
-    image.hidden = true;
+    image.classList.remove('is-loading', 'is-loaded');
     status.hidden = false;
     status.textContent = '缩略图读取失败\n点按查看原图';
   });
