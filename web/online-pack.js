@@ -91,6 +91,7 @@
     let recentOrigin = null;
     let columns = 2;
     let listScroll = 0;
+    let plainListScroll = 0;
     let openedShared = false;
     let saving = false;
     let updateSave = () => {};
@@ -193,6 +194,7 @@
         recentView = false;
         recentOrigin = null;
         listScroll = 0;
+        plainListScroll = 0;
       }
       return changed;
     }
@@ -239,7 +241,7 @@
     function showDetail(ordered, index) {
       const item = ordered[index];
       if (shared && isExpanded(item)) recordRecent(item);
-      openScreen(`${packLabel} · 图片详情`, showList);
+      openScreen(`${packLabel} · 图片详情`, showList, true);
       const screen = screenRevision;
       const title = item.title || item.id;
       const frame = node('div', 'online-pack-detail-image');
@@ -335,7 +337,13 @@
           toast('原图读取失败，已切回缩略图。');
         } : null);
       }
-      view.append(node('h2', '', title), node('p', 'online-pack-note', facts.join(' · ')), frame, original);
+      const layout = node('div', 'online-pack-detail-layout');
+      const media = node('div', 'online-pack-detail-media');
+      const info = node('div', 'online-pack-detail-copy');
+      media.append(frame, original);
+      info.append(node('h2', '', title), node('p', 'online-pack-note', facts.join(' · ')));
+      layout.append(media, info);
+      view.append(layout);
       if (shared && ordered.length > 1) {
         const nav = node('div', 'online-pack-pagination');
         const previous = button('上一张', 'soft', () => showDetail(ordered, index - 1));
@@ -370,6 +378,7 @@
       const open = button('', 'online-pack-open-photo', () => {
         if (!isExpanded(item)) { toggleImage(); return; }
         if (shared) listScroll = body.scrollTop;
+        else plainListScroll = body.scrollTop;
         showDetail(ordered, ordered.indexOf(item));
       });
       const toggle = shared ? button('', 'text-button online-pack-tile-toggle', toggleImage) : null;
@@ -555,7 +564,10 @@
               postView = null;
               byPost = grouped;
               page = 0;
+              listScroll = 0;
+              plainListScroll = 0;
               renderCatalog();
+              body.scrollTop = 0;
             });
             option.setAttribute('aria-pressed', String(recentView === recent && (recent || byPost === grouped)));
             grouping.append(option);
@@ -633,7 +645,10 @@
               if (rating === value) return;
               rating = value;
               page = 0;
+              listScroll = 0;
+              plainListScroll = 0;
               renderCatalog();
+              body.scrollTop = 0;
             });
             option.setAttribute('aria-pressed', String(rating === value));
             filters.append(option);
@@ -692,6 +707,7 @@
             if (target === page || target < 0 || target >= pages) return;
             page = target;
             listScroll = 0;
+            plainListScroll = 0;
             renderCatalog();
             body.scrollTop = 0;
           }
@@ -843,7 +859,7 @@
         renderCatalog();
       });
       renderCatalog();
-      if (shared) body.scrollTop = listScroll;
+      body.scrollTop = shared ? listScroll : plainListScroll;
       if (!catalog) {
         if (remote) loadCatalog();
         if (presetMode) loadCatalog(address);

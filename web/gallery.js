@@ -286,7 +286,7 @@ function galleryDetailImage(item) {
 function showGalleryDetail(item) {
   const session = ++gallerySession;
   const returnToGallery = () => showGallery(galleryPage, galleryScroll);
-  openScreen('原图详情', returnToGallery);
+  openScreen('原图详情', returnToGallery, true);
   const revision = screenRevision;
   const active = () => session === gallerySession && revision === screenRevision;
 
@@ -298,7 +298,11 @@ function showGalleryDetail(item) {
     node('h2', '', galleryItemName(item)),
     node('p', 'nai-gallery-note', facts),
   );
-  body.append(galleryDetailImage(item), heading);
+  const layout = node('div', 'nai-gallery-detail-layout');
+  const info = node('div', 'nai-gallery-detail-info');
+  info.append(heading);
+  layout.append(galleryDetailImage(item), info);
+  body.append(layout);
 
   const metadataButton = button('查看提示词 / 参数', 'primary', async () => {
     if (!active()) return;
@@ -404,10 +408,10 @@ function showGalleryDetail(item) {
 
   heading.append(remove);
   actions.replaceChildren(
+    metadataButton,
     button('返回图库', 'soft', () => {
       if (active()) returnToGallery();
     }),
-    metadataButton,
     exportButton,
     ...(item.kind === 'copy' || item.sourceLinked ? [exportOriginal] : []),
   );
