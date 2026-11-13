@@ -458,7 +458,8 @@ public final class MainActivity extends Activity {
                 case "openLink":
                     Uri uri = Uri.parse(value);
                     if (!"https".equals(uri.getScheme()) || !Arrays.asList("arca.live", "nax.moe", "gall.dcinside.com",
-                            "docs.novelai.net", "creativecommons.org", "huggingface.co").contains(uri.getHost())) {
+                            "docs.novelai.net", "creativecommons.org", "huggingface.co",
+                            "danbooru.donmai.us", "gelbooru.com").contains(uri.getHost())) {
                         send(id, null, "无法打开这个来源。");
                         return;
                     }

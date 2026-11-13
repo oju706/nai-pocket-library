@@ -4,6 +4,14 @@
 
 中文安卓 App，用于浏览、收藏和复制 NovelAI 标签与画面提示词。安装 APK 后，手机桌面会出现「NAI 口袋词库」。适用 Android 9 或更新版本，使用系统提供的 Android WebView。
 
+在「图库 → 外站找图」可按标签打开 Danbooru 或 Gelbooru。画师和角色详情也可用当前标签直接搜索。来源选择参考 [NAI Launcher v4.3.1](https://github.com/Aaalice233/Aaalice_NAI_Launcher/releases/tag/v4.3.1)。
+
+## 1.3.16
+
+- 「图库 → 外站找图」和画师、角色详情可用当前标签在浏览器搜索 Danbooru、Gelbooru。
+- 修复 `<artist>` 分块、转义下划线和权重末尾单冒号造成的识别漏判。识别时会查找各个已导入的画师目录。
+- 「画风串 → 加入画师」支持搜索并点选完整标签；遇到同名标签时会提示确认，避免加错画师。
+
 ## 1.3.15
 
 - 画师页优先显示样图，手机默认两列，全屏图墙可选两、三、四列。图卡可直接收藏和复制，列表底部可按页码跳转。
@@ -74,9 +82,13 @@
 - PNG 隐藏元数据依据 [NovelAI 官方格式说明](https://github.com/NovelAI/novelai-image-metadata) 独立实现。原图库与项目代码分别保留来源，NAX 的许可不套用到韩国原包。
 - [资源下载报告与韩国教程优先清单](docs/资源下载报告.md) 列明实际下载内容、校验值、原帖署名及尚未收录的部分。
 
+### 第三方参考与许可
+
+「图库 → 外站找图」的来源选择参考了 [Aaalice233/Aaalice_NAI_Launcher v4.3.1](https://github.com/Aaalice233/Aaalice_NAI_Launcher/releases/tag/v4.3.1)，其 [v4.3.1 LICENSE](https://github.com/Aaalice233/Aaalice_NAI_Launcher/blob/v4.3.1/LICENSE) 采用 MIT 许可。当前功能使用 NAI 口袋词库原有代码和公开站点标签跳转，相关代码由本项目自行编写，未复制该参考项目的实现或素材。若今后实际复用其受 MIT 许可保护的代码或素材，将保留上游版权声明和完整 MIT 许可文本。
+
 ## 构建与发布
 
-当前版本为 1.3.15（versionCode 19），包名为 `app.nai.pocketlibrary`。构建使用 Windows 上的 PowerShell、JDK 17、Android SDK Platform 35 和 Build Tools 35.0.0。
+当前版本为 1.3.16（versionCode 20），包名为 `app.nai.pocketlibrary`。构建使用 Windows 上的 PowerShell、JDK 17、Android SDK Platform 35 和 Build Tools 35.0.0。
 
 脚本使用下面的便携工具目录。可用 `-ToolCache` 指定目录位置。
 

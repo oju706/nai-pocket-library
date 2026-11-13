@@ -141,7 +141,11 @@ async function galleryImport(session, trigger) {
 
 function galleryListActions(session) {
   const trigger = button('导入原图', 'primary', () => galleryImport(session, trigger));
-  actions.replaceChildren(trigger);
+  actions.replaceChildren(button('外站找图', 'soft', () => {
+    const page = galleryPage;
+    const scroll = body.scrollTop;
+    showTagGalleries('', () => showGallery(page, scroll));
+  }), trigger);
 }
 
 async function galleryLoad(session, requestedPage, requestedScroll) {

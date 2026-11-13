@@ -4,6 +4,19 @@
 const PocketSources = (() => {
   const nax = 'https://nax.moe/';
   const arca = 'https://arca.live/b/aiart/185686780';
+  const tagGalleries = [
+    {
+      id: 'gelbooru',
+      label: 'Gelbooru',
+      search: 'https://gelbooru.com/index.php?page=post&s=list',
+      defaultTag: 'all',
+    },
+    {
+      id: 'danbooru',
+      label: 'Danbooru',
+      search: 'https://danbooru.donmai.us/posts',
+    },
+  ];
   const galleries = [
     ['danbooru-artist-tags-2-v5', 'artist', 'V5', '宽松提示词'],
     ['danbooru-artist-tags-v5', 'artist', 'V5', '约束提示词'],
@@ -151,5 +164,24 @@ const PocketSources = (() => {
     reference('韩国社区 · NAI 标签汇总', '含 V4.5 Full 画师串、眼型、照明、色彩与动作索引。', 'https://gall.dcinside.com/mini/board/view/?id=wrtnw&no=152281', 'general', 'DC Inside'),
   ];
 
-  return { onlineCards, koreanCards, packCards, knowledge, references, knowledgeKinds, nax, arca };
+  function tagGalleryTag(value) {
+    return String(value ?? '').normalize('NFKC').trim()
+      .replace(/^(?:artist|character)\s*:\s*/i, '')
+      .replace(/\\([\\_(),])/g, '$1')
+      .replace(/\s+/g, '_');
+  }
+
+  function tagGallerySearchUrl(id, value) {
+    const gallery = tagGalleries.find((item) => item.id === id);
+    if (!gallery) return '';
+    const tag = tagGalleryTag(value) || gallery.defaultTag;
+    const url = new URL(gallery.search);
+    if (tag) url.searchParams.set('tags', tag);
+    return url.href;
+  }
+
+  return {
+    onlineCards, koreanCards, packCards, knowledge, references, knowledgeKinds,
+    tagGalleries, tagGalleryTag, tagGallerySearchUrl, nax, arca,
+  };
 })();

@@ -290,6 +290,9 @@ h2 { font-size: 19px; line-height: 1.35; margin: 0; }
 .artist-chain-heading .text-button { margin-left: auto; }
 .artist-chain-add { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; margin-top: 10px; }
 .artist-chain-add input { width: 100%; min-width: 0; min-height: 46px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface); color: var(--ink); font-size: 16px; }
+.artist-chain-choices { margin: 8px 0 14px; padding: 0 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.artist-chain-choices .pack-source:last-child { border-bottom: 0; }
+.artist-chain-choices p { margin: 10px 0; font-size: 12px; }
 .artist-chain-feedback { min-height: 20px; margin: 5px 0 0; color: var(--accent-ink); font-size: 13px; line-height: 1.45; }
 .artist-chain-catalog { margin: 2px 0 10px; font-size: 12px; line-height: 1.5; }
 .artist-chain-list { display: grid; gap: 8px; }
@@ -354,6 +357,9 @@ h2 { font-size: 19px; line-height: 1.35; margin: 0; }
 .tool-section:last-child { border: 0; margin-bottom: 0; }
 .tool-section > p { font-size: 13px; line-height: 1.6; margin: 7px 0 12px; }
 .tool-section .prompt { margin-bottom: 10px; }
+.tag-gallery-search { margin: 12px 0; }
+.tag-gallery-search h3 { margin: 0 0 6px; font-size: 14px; }
+.tag-gallery-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .tool-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
 .update-result { font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
 .update-result > button { margin-right: 8px; }
