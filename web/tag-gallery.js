@@ -75,6 +75,11 @@ function tagGalleryRawKind(tag) {
   return known || candidates[0] || '';
 }
 
+function tagGalleryDictionaryAppend(target, name, gallery) {
+  if (gallery.site !== 'danbooru' || typeof window.tagDictionaryAppend !== 'function') return;
+  window.tagDictionaryAppend(target, name, () => activeTagGallery === gallery && target.isConnected);
+}
+
 function tagGallerySearchTag(gallery, tag) {
   const value = tagGalleryNormalizeQuery(tag?.name || tag);
   if (!value || activeTagGallery !== gallery) return;
@@ -181,7 +186,9 @@ function tagGalleryRenderSuggestions(gallery) {
       gallery.suggestions = [];
       tagGallerySearch(gallery, 1);
     });
-    item.append(node('span', 'tag-gallery-suggestion-name', name));
+    const suggestionName = node('span', 'tag-gallery-suggestion-name', name);
+    tagGalleryDictionaryAppend(suggestionName, name, gallery);
+    item.append(suggestionName);
     if (detail) item.append(node('span', 'tag-gallery-suggestion-meta', detail));
     box.append(item);
   }
@@ -486,7 +493,17 @@ function tagGalleryRenderSearch(gallery, requestedScroll = 0) {
   body.scrollTop = requestedScroll;
   tagGalleryRenderSuggestions(gallery);
 
-  actions.replaceChildren(button('连接设置', 'soft', () => tagGalleryOpenCredentials(gallery)));
+  actions.replaceChildren(
+    button('连接设置', 'soft', () => tagGalleryOpenCredentials(gallery)),
+    button('中文词典', 'soft', () => {
+      if (typeof window.showTagDictionarySettings !== 'function') {
+        toast('中文词典入口尚未载入，请重新打开 App。');
+        return;
+      }
+      const scroll = body.scrollTop;
+      window.showTagDictionarySettings(() => tagGalleryRenderSearch(gallery, scroll));
+    }),
+  );
 }
 
 async function tagGallerySearch(gallery, requestedPage = 1) {
@@ -607,6 +624,7 @@ function tagGalleryShowPost(gallery, index, requestedScroll = 0) {
         const name = node('div', 'tag-gallery-tag-name');
         name.append(node('strong', '', tag.name),
           node('span', 'tag-gallery-tag-category', kind.label));
+        tagGalleryDictionaryAppend(name, tag.name, gallery);
         const controls = node('div', 'tag-gallery-tag-actions');
         const copyControl = button('复制', 'soft compact', () => copy(tag.name));
         copyControl.setAttribute('aria-label', `复制标签 ${tag.name}`);

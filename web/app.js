@@ -671,6 +671,241 @@ window.PocketProgress = (percentage) => {
   if (state.importing && state.section === 'artist' && state.mode === 'online') renderList();
 };
 
+const tagDictionaryTranslations = new Map();
+const tagDictionaryQueue = new Set();
+const tagDictionaryWaiters = new Set();
+let tagDictionaryFlushTimer = 0;
+let tagDictionaryFlushRunning = false;
+let tagDictionaryGeneration = 0;
+const tagDictionaryBatchSize = 200;
+
+function tagDictionaryKey(value) {
+  return PocketSources.tagGalleryTag(value);
+}
+
+function tagDictionaryUniqueKeys(values) {
+  const keys = new Set();
+  for (const value of Array.isArray(values) ? values : [values]) {
+    const key = tagDictionaryKey(value);
+    if (key && key.length <= 512) keys.add(key);
+  }
+  return [...keys];
+}
+
+function tagDictionarySnapshot(keys) {
+  return Object.fromEntries(keys
+    .filter((key) => tagDictionaryTranslations.get(key))
+    .map((key) => [key, tagDictionaryTranslations.get(key)]));
+}
+
+function tagDictionarySettleWaiters() {
+  for (const waiter of [...tagDictionaryWaiters]) {
+    if (!waiter.keys.every((key) => tagDictionaryTranslations.has(key))) continue;
+    tagDictionaryWaiters.delete(waiter);
+    waiter.resolve(tagDictionarySnapshot(waiter.keys));
+  }
+}
+
+function tagDictionaryScheduleFlush() {
+  if (tagDictionaryFlushRunning || tagDictionaryFlushTimer || !tagDictionaryQueue.size || !window.Pocket) return;
+  tagDictionaryFlushTimer = setTimeout(tagDictionaryFlush, 16);
+}
+
+async function tagDictionaryFlush() {
+  tagDictionaryFlushTimer = 0;
+  if (tagDictionaryFlushRunning) return;
+  tagDictionaryFlushRunning = true;
+  try {
+    while (tagDictionaryQueue.size) {
+      const generation = tagDictionaryGeneration;
+      const keys = [...tagDictionaryQueue].slice(0, tagDictionaryBatchSize);
+      for (const key of keys) tagDictionaryQueue.delete(key);
+      let payload = {};
+      try {
+        const returned = await native('tagDictionaryLookup', JSON.stringify(keys));
+        if (returned && typeof returned === 'object' && !Array.isArray(returned)) payload = returned;
+      } catch {
+        // A missing or damaged dictionary quietly leaves every original tag untouched.
+      }
+      if (generation === tagDictionaryGeneration) {
+        for (const key of keys) {
+          const value = Object.hasOwn(payload, key) && typeof payload[key] === 'string'
+            ? payload[key].trim() : '';
+          tagDictionaryTranslations.set(key, value);
+        }
+        tagDictionarySettleWaiters();
+      }
+    }
+  } finally {
+    tagDictionaryFlushRunning = false;
+    tagDictionarySettleWaiters();
+    tagDictionaryScheduleFlush();
+  }
+}
+
+function tagDictionaryLookup(values) {
+  const keys = tagDictionaryUniqueKeys(values);
+  if (!keys.length || !window.Pocket) return Promise.resolve(tagDictionarySnapshot(keys));
+  const missing = keys.filter((key) => !tagDictionaryTranslations.has(key));
+  if (!missing.length) return Promise.resolve(tagDictionarySnapshot(keys));
+  return new Promise((resolve) => {
+    const waiter = { keys, resolve };
+    tagDictionaryWaiters.add(waiter);
+    for (const key of missing) tagDictionaryQueue.add(key);
+    tagDictionaryScheduleFlush();
+  });
+}
+
+function tagDictionaryClearCache() {
+  tagDictionaryGeneration++;
+  tagDictionaryTranslations.clear();
+  tagDictionaryQueue.clear();
+  clearTimeout(tagDictionaryFlushTimer);
+  tagDictionaryFlushTimer = 0;
+  for (const waiter of tagDictionaryWaiters) waiter.resolve({});
+  tagDictionaryWaiters.clear();
+}
+
+function tagDictionaryAppend(target, name, guard = null) {
+  const key = tagDictionaryKey(name);
+  if (!target || !key) return null;
+  const label = node('span', 'tag-dictionary-translation');
+  label.hidden = true;
+  target.append(label);
+  const current = () => {
+    try { return label.isConnected && (!guard || guard()); } catch { return false; }
+  };
+  if (tagDictionaryTranslations.has(key)) {
+    const value = tagDictionaryTranslations.get(key);
+    if (!value) {
+      label.remove();
+      return null;
+    }
+    label.textContent = value;
+    label.hidden = false;
+    return label;
+  }
+  tagDictionaryLookup([key]).then((translations) => {
+    if (!current()) return;
+    const value = translations[key] || tagDictionaryTranslations.get(key) || '';
+    if (!value || !current()) {
+      label.remove();
+      return;
+    }
+    label.textContent = value;
+    label.hidden = false;
+  }).catch(() => label.remove());
+  return label;
+}
+
+function showTagDictionarySettings(back = null) {
+  openScreen('中文标签词典', back);
+  const revision = screenRevision;
+  const section = toolSection('ffdkj 丹波鲁中英词典',
+    '可选下载约 25 MB 的本地词典，用于在原始标签旁显示中文。词典不会打包进 App；点击下载后从 GitHub 获取并校验，安装后即可离线使用。');
+  const status = node('p', 'detail-note tag-dictionary-status', '正在读取安装状态…');
+  status.setAttribute('aria-live', 'polite');
+  const controls = node('div', 'tool-actions');
+  section.append(status, controls);
+  const source = node('p', 'detail-note',
+    '数据来源：ffdkj-Danbooru_Tag-Chinese-English-Translation-Table，按 MIT 许可使用。译文只作辅助显示；复制、搜索、图站请求、Wiki 地址与画风串仍使用原词。');
+  const sourceActions = node('div', 'tool-actions');
+  sourceActions.append(button('打开原始仓库', 'text-button', () => openLink(
+    'https://github.com/ffdkj/ffdkj-Danbooru_Tag-Chinese-English-Translation-Table')));
+  section.append(source, sourceActions);
+  let info = null;
+  let busy = false;
+  let busyLabel = '';
+  let failure = '';
+  let readingStatus = Boolean(window.Pocket);
+
+  function renderStatus() {
+    const installedBytes = Number(info?.bytes) || 0;
+    if (busy) {
+      status.textContent = busyLabel;
+    } else if (failure) {
+      status.textContent = failure;
+    } else if (info?.installed) {
+      status.textContent = `已安装 ${info.version || 'v2026-11-01'} · ${(installedBytes / (1024 * 1024)).toFixed(1)} MB · 安装态已校验，可离线使用。`;
+    } else if (info) {
+      status.textContent = '未安装。词典缺失时所有原词照常显示、搜索和复制；安装失败不会影响搜图。';
+    } else if (readingStatus) {
+      status.textContent = '正在读取安装状态…';
+    } else {
+      status.textContent = '暂时无法读取安装状态，可以直接重试安装。';
+    }
+    status.classList.toggle('danger', Boolean(failure));
+    controls.replaceChildren();
+    if (!window.Pocket) {
+      controls.append(node('span', 'muted', '浏览器预览不安装本地词典，请在 Android App 中使用。'));
+      return;
+    }
+    const installLabel = info?.installed ? '校验安装' : failure ? '重试下载并安装（约 25 MB）' : '下载并安装（约 25 MB）';
+    const install = button(busy ? busyLabel : installLabel, 'primary', async () => {
+      if (info?.installed) {
+        await runDictionaryAction('tagDictionaryStatus', '正在校验本机词典…', '中文标签词典状态正常');
+        return;
+      }
+      await runDictionaryAction('tagDictionaryInstall', '正在下载并校验词典…', '中文标签词典已安装');
+    });
+    install.disabled = busy || readingStatus;
+    controls.append(install);
+    if (info?.installed && !busy) {
+      controls.append(button('卸载词典', 'soft', async () => {
+        if (!confirm('卸载中文标签词典？原词、收藏和图站功能都不会删除。')) return;
+        await runDictionaryAction('tagDictionaryRemove', '正在卸载词典…', '中文标签词典已卸载');
+      }));
+    }
+  }
+
+  async function runDictionaryAction(action, label, successMessage) {
+    if (busy) return;
+    busy = true;
+    busyLabel = label;
+    failure = '';
+    renderStatus();
+    try {
+      const result = await native(action);
+      if (action === 'tagDictionaryInstall' || action === 'tagDictionaryRemove') {
+        tagDictionaryClearCache();
+      }
+      if (revision !== screenRevision) return;
+      info = result;
+      toast(successMessage);
+    } catch (error) {
+      if (revision !== screenRevision) return;
+      failure = error?.message || '词典操作失败，请重试。';
+    } finally {
+      if (revision === screenRevision) {
+        busy = false;
+        renderStatus();
+      }
+    }
+  }
+
+  renderStatus();
+  if (window.Pocket) {
+    native('tagDictionaryStatus').then((result) => {
+      if (revision !== screenRevision) return;
+      readingStatus = false;
+      info = result;
+      failure = '';
+      renderStatus();
+    }).catch((error) => {
+      if (revision !== screenRevision) return;
+      readingStatus = false;
+      failure = error?.message || '暂时无法读取词典安装状态。';
+      renderStatus();
+    });
+  }
+}
+
+window.tagDictionaryKey = tagDictionaryKey;
+window.tagDictionaryLookup = tagDictionaryLookup;
+window.tagDictionaryAppend = tagDictionaryAppend;
+window.tagDictionaryClearCache = tagDictionaryClearCache;
+window.showTagDictionarySettings = showTagDictionarySettings;
+
 let database;
 function openDatabase() {
   if (!database) {
@@ -2097,6 +2332,20 @@ function showPhotos(card, initialIndex = 0, detailBack = null) {
 function showCard(card, photoIndex = 0, back = null) {
   openScreen('条目详情', back);
   body.append(node('h2', '', card.title));
+  const dictionaryValue = card.section === 'artist'
+    ? artistChainCardTag(card) || artistCardTag(card)
+    : card.prompt || card.title;
+  const dictionaryTerms = card.section === 'knowledge'
+    ? tagGalleryReferenceTags(dictionaryValue).map((tag) => tag.name)
+    : [dictionaryValue].filter(Boolean);
+  if (dictionaryTerms.length) {
+    const translations = node('div', 'tag-dictionary-detail');
+    translations.setAttribute('aria-label', '中文标签译名');
+    for (const name of [...new Set(dictionaryTerms)].slice(0, 200)) {
+      tagDictionaryAppend(translations, name);
+    }
+    body.append(translations);
+  }
   const badges = node('div', 'badges');
   for (const value of [sections[card.section].label, card.model, card.source].filter(Boolean)) {
     badges.append(node('span', 'badge', value));
@@ -3235,8 +3484,10 @@ function openArtistChainWorkbench({
       const row = node('article', 'artist-chain-item');
       row.classList.toggle('is-disabled', Boolean(item.disabled));
       const heading = node('div', 'artist-chain-item-heading');
-      heading.append(node('strong', '', item.tag),
-        node('small', 'muted', `第 ${index + 1} 位${item.disabled ? ' · 已停用' : ''}`));
+      const title = node('div', 'artist-chain-item-title');
+      title.append(node('strong', '', item.tag));
+      tagDictionaryAppend(title, item.tag, () => row.isConnected && revision === screenRevision);
+      heading.append(title, node('small', 'muted', `第 ${index + 1} 位${item.disabled ? ' · 已停用' : ''}`));
       const controls = node('div', 'artist-chain-item-controls');
       const up = button('上移', 'soft compact', () => {
         if (!index) return;
@@ -3428,6 +3679,7 @@ function openArtistChainWorkbench({
       const row = node('div', 'pack-source');
       const label = node('div');
       label.append(node('strong', '', tag), node('small', '', [card.source, card.model].filter(Boolean).join(' · ')));
+      tagDictionaryAppend(label, tag, () => label.isConnected && revision === screenRevision);
       const select = button('加入', 'soft compact', () => finishArtistAddition(enqueueArtistChainTag(draft, activeModel, tag)));
       select.setAttribute('aria-label', `加入 ${tag}`);
       row.append(label, select);
@@ -3838,6 +4090,7 @@ function promptArtistRow(item, catalog, targetModel, openSample, polarity, sampl
   const header = node('div', 'pack-source');
   const info = node('div');
   info.append(node('strong', '', item.name));
+  tagDictionaryAppend(info, item.name, () => row.isConnected);
   if (item.candidates.length) {
     const librarySources = [...new Set(item.candidates.map((record) =>
       record.card.source || (record.kind === 'nax' ? 'NAX' : record.kind === 'imported' ? '已导入' : '韩国 V5')))];
@@ -4234,6 +4487,7 @@ function showPromptImport(data, {
       });
       choice.append(checkbox, node('span', 'reference-tag-name', tag.name),
         node('span', 'tag-gallery-tag-category', kind.label));
+      tagDictionaryAppend(choice, tag.name, () => row.isConnected);
       const controls = node('div', 'reference-tag-actions');
       controls.append(
         button('复制原标签', 'soft compact', () => copy(tag.name)),
@@ -4407,6 +4661,10 @@ function showTools(initialUpdate) {
   } else {
     tagGallery.append(node('p', 'detail-note', '浏览器预览不保存图库凭据，请在 Android App 中配置。'));
   }
+  const dictionary = toolSection('中文标签词典',
+    '可选下载 ffdkj 丹波鲁中英词典，在 D 站标签、词库原词、参考标签和画风串旁显示中文译名。约 25 MB，仅在你点击后下载；原词与复制内容保持不变。');
+  dictionary.append(button(window.Pocket ? '打开词典安装与管理' : '查看词典说明', window.Pocket
+    ? 'soft' : 'subtle', () => showTagDictionarySettings(() => showTools(initialUpdate))));
   const backup = toolSection('个人词库备份', '备份收藏、自己写的条目和自选配图。图库原图请单独保留，换机后可重新导入。');
   const backupActions = node('div', 'tool-actions');
   backupActions.append(button('导出备份', 'soft', exportBackup), button('从备份恢复', 'soft', importBackup));
@@ -4536,9 +4794,11 @@ function showTools(initialUpdate) {
     version.textContent = '当前为浏览器预览，安卓 App 中可检查版本。';
     saveRepo.disabled = check.disabled = true;
   }
-  const thanks = toolSection('来源与感谢', '感谢韩国 Arca Live 社区作者 bequiet / baqu2213 分享原版画师库和查看器；感谢 Carlyone 的 NAX 图库，以及韩国社区和 NovelAI 官方资料。');
+  const thanks = toolSection('来源与感谢', '感谢韩国 Arca Live 社区作者 bequiet / baqu2213 分享原版画师库和查看器；感谢 Carlyone 的 NAX 图库、ffdkj 的丹波鲁中英词典（MIT），以及韩国社区和 NovelAI 官方资料。');
   thanks.append(button('原版画师资源', 'text-button', () => openLink('https://arca.live/b/aiart/185691299')),
-    button('NAX · CC BY 4.0', 'text-button', () => openLink(PocketSources.nax)));
+    button('NAX · CC BY 4.0', 'text-button', () => openLink(PocketSources.nax)),
+    button('ffdkj 词典 · MIT', 'text-button', () => openLink(
+      'https://github.com/ffdkj/ffdkj-Danbooru_Tag-Chinese-English-Translation-Table')));
   if (initialUpdate?.available || updateOffer?.available) {
     displayUpdate(initialUpdate?.available ? initialUpdate : updateOffer);
     if (initialUpdate?.available) update.scrollIntoView({ block: 'start' });

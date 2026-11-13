@@ -57,8 +57,11 @@ public final class MainActivity extends Activity {
     private static final int PAPER = Color.rgb(246, 244, 237);
     private final ExecutorService files = Executors.newSingleThreadExecutor();
     private final ExecutorService updateChecks = Executors.newSingleThreadExecutor();
+    private final ExecutorService dictionaryDownloads = Executors.newSingleThreadExecutor();
+    private final ExecutorService dictionaryLookups = Executors.newSingleThreadExecutor();
     private OnlinePacks onlinePacks;
     private TagGallery tagGallery;
+    private TagDictionary tagDictionary;
     private PackPhotoCache photoCache;
     private SharedPreferences packCacheSettings;
     private int picker;
@@ -93,6 +96,7 @@ public final class MainActivity extends Activity {
                 packCacheSettings.getInt(PACK_CACHE_LIMIT, DEFAULT_PACK_CACHE_LIMIT));
         onlinePacks = new OnlinePacks(photoCache);
         tagGallery = new TagGallery(this);
+        tagDictionary = new TagDictionary(this);
         sharedStyles = new SharedStylePacks(this, photoCache);
         files.execute(() -> {
             OnlinePacks.clearExpiredExports(getCacheDir());
@@ -494,6 +498,14 @@ public final class MainActivity extends Activity {
                 case "saveTagGalleryCredentials":
                     files.execute(() -> tagGalleryCredentials(id, action, value));
                     return;
+                case "tagDictionaryStatus":
+                case "tagDictionaryLookup":
+                    dictionaryLookups.execute(() -> tagDictionaryAction(id, action, value));
+                    return;
+                case "tagDictionaryInstall":
+                case "tagDictionaryRemove":
+                    dictionaryDownloads.execute(() -> tagDictionaryAction(id, action, value));
+                    return;
                 case "openTagGalleryWebsite":
                     Uri siteUrl = Uri.parse(value);
                     if (!TagWebsiteActivity.allows(siteUrl)) {
@@ -507,7 +519,7 @@ public final class MainActivity extends Activity {
                     Uri uri = Uri.parse(value);
                     if (!"https".equals(uri.getScheme()) || !Arrays.asList("arca.live", "nax.moe", "gall.dcinside.com",
                             "docs.novelai.net", "creativecommons.org", "huggingface.co",
-                            "danbooru.donmai.us", "gelbooru.com").contains(uri.getHost())) {
+                            "danbooru.donmai.us", "gelbooru.com", "github.com").contains(uri.getHost())) {
                         send(id, null, "无法打开这个来源。");
                         return;
                     }
@@ -537,6 +549,23 @@ public final class MainActivity extends Activity {
             runOnUiThread(() -> send(id, null, message == null ? "图库连接暂时不可用。" : message));
         } catch (JSONException | RuntimeException failure) {
             runOnUiThread(() -> send(id, null, "图库连接暂时不可用。"));
+        }
+    }
+
+    private void tagDictionaryAction(int id, String action, String value) {
+        try {
+            Object result;
+            if ("tagDictionaryInstall".equals(action)) result = tagDictionary.install();
+            else if ("tagDictionaryRemove".equals(action)) result = tagDictionary.remove();
+            else if ("tagDictionaryLookup".equals(action)) result = tagDictionary.lookup(value);
+            else result = tagDictionary.status();
+            Object completed = result;
+            runOnUiThread(() -> send(id, completed, null));
+        } catch (Exception failure) {
+            String detail = failure.getMessage();
+            String message = detail == null || detail.trim().isEmpty()
+                    ? "中文标签词典操作失败，请重试。" : detail;
+            runOnUiThread(() -> send(id, null, message));
         }
     }
 
@@ -1212,6 +1241,8 @@ public final class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         files.shutdownNow();
+        dictionaryDownloads.shutdownNow();
+        dictionaryLookups.shutdownNow();
         if (onlineExport != null) onlineExport.file.delete();
         cleanupOnlineGalleryTemp(onlineGalleryTemp);
         updateChecks.shutdownNow();

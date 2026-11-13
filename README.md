@@ -8,6 +8,11 @@
 
 「在 App 内打开官网」会在独立的网页页签保留站点自己的搜索、登录和浏览方式。Gelbooru 的图库接口需要用户 ID 和 API Key，直接打开官网可使用站点自己的访问方式。来源选择参考 [NAI Launcher v4.3.1](https://github.com/Aaalice233/Aaalice_NAI_Launcher/releases/tag/v4.3.1)。
 
+## 1.3.18
+
+- 从「工具 → 中文标签词典」或 D 站图库安装 ffdkj 的中英词典。首次下载约 25 MB，安装后可离线查词。 [词典发布页](https://github.com/ffdkj/ffdkj-Danbooru_Tag-Chinese-English-Translation-Table/releases/tag/v2026-11-01)
+- D 站标签和搜索候选、画师与角色详情、画面提示词知识、参考标签和画风串可显示中文释义。复制、保存、导出及带去搜图都使用原来的标签或提示词。
+
 ## 1.3.17
 
 - D 站和 G 站的搜索结果直接加载缩略图，点开可看大图和标签。
@@ -88,6 +93,7 @@
 - App 的在线画师和同人角色样图来自 **Carlyone 的 NovelAI Tag Experiments（NAX）**。按模型和标签合并目录，图片仍从原出处按需读取。 [NAX](https://nax.moe/) · [公开标签索引](https://nax.moe/downloads/tags.zip) · [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
 - 韩国 **DC Inside** 的社区资料可用于查找动作、手势、画师串与画面词。 [姿势原帖](https://gall.dcinside.com/mini/board/view/?id=wrtnw&no=139401) · [手势原帖](https://gall.dcinside.com/mini/board/view/?id=wrtnw&no=138201) · [资料汇总](https://gall.dcinside.com/mini/board/view/?id=wrtnw&no=152281)
 - PNG 隐藏元数据依据 [NovelAI 官方格式说明](https://github.com/NovelAI/novelai-image-metadata) 独立实现。原图库与项目代码分别保留来源，NAX 的许可不套用到韩国原包。
+- 感谢 **ffdkj** 提供丹波鲁中英词典。App 按 MIT 许可使用公开快照，点击安装时从作者的 GitHub 下载。 [原始仓库](https://github.com/ffdkj/ffdkj-Danbooru_Tag-Chinese-English-Translation-Table) · [完整 MIT 许可](docs/ffdkj-MIT.txt)
 - [资源下载报告与韩国教程优先清单](docs/资源下载报告.md) 列明实际下载内容、校验值、原帖署名及尚未收录的部分。
 
 ### 第三方参考与许可
@@ -96,7 +102,7 @@
 
 ## 构建与发布
 
-当前版本为 1.3.17（versionCode 21），包名为 `app.nai.pocketlibrary`。构建使用 Windows 上的 PowerShell、JDK 17、Android SDK Platform 35 和 Build Tools 35.0.0。
+当前版本为 1.3.18（versionCode 22），包名为 `app.nai.pocketlibrary`。构建使用 Windows 上的 PowerShell、JDK 17、Android SDK Platform 35 和 Build Tools 35.0.0。
 
 脚本使用下面的便携工具目录。可用 `-ToolCache` 指定目录位置。
 
