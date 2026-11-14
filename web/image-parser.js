@@ -59,6 +59,7 @@ const webPromptLimits = Object.freeze({
   pixels: 8_000_000,
   metadataBytes: 2 * 1024 * 1024,
   textFields: 128,
+  ifdEntries: 256,
 });
 const pngSignature = Object.freeze([137, 80, 78, 71, 13, 10, 26, 10]);
 const promptParameterWrappers = new Set([
@@ -128,6 +129,160 @@ function promptTextBytes(value) {
   const length = utf8ByteLength(value);
   if (length > webPromptLimits.metadataBytes) throw new Error('图片中的单个文本字段超过 2 MB。');
   return length;
+}
+
+function promptStripTrailingNul(value) {
+  return String(value).replace(/\0+$/, '');
+}
+
+function decodePromptUtf8Loose(bytes, start, end) {
+  if (end <= start) return '';
+  try {
+    return utf8TextDecoder.decode(bytes.subarray(start, end));
+  } catch {
+    return latin1TextDecoder.decode(bytes.subarray(start, end));
+  }
+}
+
+function decodePromptUtf16Loose(bytes, start, end, littleEndian) {
+  if (end - start >= 2 && bytes[start] === 0xff && bytes[start + 1] === 0xfe) {
+    littleEndian = true;
+    start += 2;
+  } else if (end - start >= 2 && bytes[start] === 0xfe && bytes[start + 1] === 0xff) {
+    littleEndian = false;
+    start += 2;
+  }
+  if ((end - start) & 1) end--;
+  if (end <= start) return '';
+  const encoding = littleEndian ? 'utf-16le' : 'utf-16be';
+  return promptStripTrailingNul(new TextDecoder(encoding).decode(bytes.subarray(start, end)));
+}
+
+function promptUtf16Endian(bytes, start, end) {
+  let evenZeros = 0;
+  let oddZeros = 0;
+  const sampleEnd = Math.min(end, start + 64);
+  for (let offset = start; offset < sampleEnd; offset++) {
+    if (bytes[offset] !== 0) continue;
+    if ((offset - start) & 1) oddZeros++;
+    else evenZeros++;
+  }
+  if (oddZeros > evenZeros) return true;
+  if (evenZeros > oddZeros) return false;
+  return null;
+}
+
+function decodePromptUserComment(bytes, start, end, tiffLittleEndian) {
+  if (end <= start) return '';
+  const marker = promptAscii(bytes, start, Math.min(end, start + 8));
+  if (marker.startsWith('ASCII')) {
+    return promptStripTrailingNul(decodePromptUtf8Loose(bytes, start + 8, end));
+  }
+  if (marker.startsWith('UNICODE')) {
+    const textStart = start + 8;
+    const littleEndian = promptUtf16Endian(bytes, textStart, end) ?? tiffLittleEndian;
+    return decodePromptUtf16Loose(bytes, textStart, end, littleEndian);
+  }
+  if (marker.startsWith('JIS')) {
+    try {
+      return promptStripTrailingNul(new TextDecoder('iso-2022-jp')
+        .decode(bytes.subarray(start + 8, end)));
+    } catch {
+      return '';
+    }
+  }
+  return promptStripTrailingNul(decodePromptUtf8Loose(bytes, start, end));
+}
+
+function promptExifFieldName(tag, exifIfd) {
+  if (tag === 0x9286) return 'UserComment';
+  if (exifIfd) return '';
+  switch (tag) {
+    case 0x010e: return 'ImageDescription';
+    case 0x010f: return 'Make';
+    case 0x0110: return 'Model';
+    case 0x0131: return 'Software';
+    case 0x013b: return 'Artist';
+    case 0x8298: return 'Copyright';
+    case 0x9c9c: return 'XPComment';
+    case 0x9c9e: return 'XPTitle';
+    case 0x9c9f: return 'XPSubject';
+    default: return '';
+  }
+}
+
+function promptExifTypeSize(type) {
+  if ([1, 2, 6, 7].includes(type)) return 1;
+  if ([3, 8].includes(type)) return 2;
+  if ([4, 9, 11].includes(type)) return 4;
+  return [5, 10, 12].includes(type) ? 8 : 0;
+}
+
+function readPromptExifIfd(bytes, data, base, end, relativeOffset, littleEndian, exifIfd) {
+  const absolute = base + relativeOffset;
+  if (!Number.isSafeInteger(absolute) || absolute < base || absolute + 2 > end) {
+    throw new Error('EXIF 目录偏移无效。');
+  }
+  const count = data.getUint16(absolute, littleEndian);
+  if (count > webPromptLimits.ifdEntries) throw new Error('EXIF 目录条目过多，暂时无法读取。');
+  if (absolute + 2 + count * 12 > end) throw new Error('EXIF 目录不完整。');
+  const fields = new Map();
+  let exifOffset = 0;
+  let remaining = webPromptLimits.metadataBytes;
+  for (let index = 0; index < count; index++) {
+    const entry = absolute + 2 + index * 12;
+    const tag = data.getUint16(entry, littleEndian);
+    const type = data.getUint16(entry + 2, littleEndian);
+    const components = data.getUint32(entry + 4, littleEndian);
+    if (!exifIfd && tag === 0x8769) {
+      exifOffset = data.getUint32(entry + 8, littleEndian);
+      continue;
+    }
+    const name = promptExifFieldName(tag, exifIfd);
+    const unit = promptExifTypeSize(type);
+    if (!name || !unit || !components) continue;
+    const byteLength = components * unit;
+    remaining -= byteLength;
+    if (remaining < 0) {
+      throw new Error('EXIF 文本字段超过 2 MB。');
+    }
+    const valueOffset = byteLength <= 4
+      ? entry + 8
+      : base + data.getUint32(entry + 8, littleEndian);
+    if (!Number.isSafeInteger(valueOffset) || valueOffset < base || valueOffset + byteLength > end) {
+      throw new Error('EXIF 文本字段偏移无效。');
+    }
+    let value;
+    if (tag === 0x9286) {
+      value = decodePromptUserComment(bytes, valueOffset, valueOffset + byteLength, littleEndian);
+    } else if (tag === 0x9c9c || tag === 0x9c9e || tag === 0x9c9f) {
+      value = decodePromptUtf16Loose(bytes, valueOffset, valueOffset + byteLength, true);
+    } else {
+      value = promptStripTrailingNul(
+        decodePromptUtf8Loose(bytes, valueOffset, valueOffset + byteLength),
+      );
+    }
+    if (value) addPromptField(fields, name, value);
+  }
+  return { fields, exifOffset };
+}
+
+function parsePromptExif(bytes, data, base, end) {
+  if (base < 0 || base + 8 > end || end > bytes.length) throw new Error('EXIF 数据不完整。');
+  let littleEndian;
+  if (bytes[base] === 0x49 && bytes[base + 1] === 0x49) littleEndian = true;
+  else if (bytes[base] === 0x4d && bytes[base + 1] === 0x4d) littleEndian = false;
+  else throw new Error('EXIF 字节序标记无效。');
+  if (data.getUint16(base + 2, littleEndian) !== 42) throw new Error('EXIF TIFF 文件头无效。');
+  const ifd0 = data.getUint32(base + 4, littleEndian);
+  if (!ifd0) return new Map();
+  const root = readPromptExifIfd(bytes, data, base, end, ifd0, littleEndian, false);
+  const fields = new Map(root.fields);
+  if (root.exifOffset) {
+    const exif = readPromptExifIfd(bytes, data, base, end, root.exifOffset, littleEndian, true);
+    for (const [key, value] of exif.fields) addPromptField(fields, key, value);
+  }
+  return fields;
 }
 
 async function promptDecompress(bytes, format, label) {
@@ -258,6 +413,11 @@ function parseWebpMetadata(buffer) {
   let height = 0;
   let hasAlpha = false;
   let hasExif = false;
+  let hasXmp = false;
+  let exifError = '';
+  let metadataBytes = 0;
+  let exifBytes = 0;
+  const fields = new Map();
   for (let offset = 12, chunkCount = 0; offset + 8 <= riffEnd; chunkCount++) {
     if (chunkCount >= 10000) throw new Error('WebP 数据块过多。');
     const type = promptAscii(bytes, offset, offset + 4);
@@ -279,12 +439,121 @@ function parseWebpMetadata(buffer) {
       height ||= readPromptU16(data, start + 8, true) & 0x3fff;
     } else if (type === 'EXIF') {
       hasExif = true;
+      exifBytes += length;
+      if (exifBytes > webPromptLimits.metadataBytes) throw new Error('WebP EXIF 超过 2 MB。');
+      const exifStart = length >= 6 && promptAscii(bytes, start, start + 6) === 'Exif\0\0'
+        ? start + 6 : start;
+      let exifFields;
+      try {
+        exifFields = parsePromptExif(bytes, data, exifStart, start + length);
+      } catch (error) {
+        exifError ||= error.message;
+        offset = start + length + (length & 1);
+        continue;
+      }
+      for (const [key, value] of exifFields) {
+        metadataBytes += promptTextBytes(value);
+        if (metadataBytes > webPromptLimits.metadataBytes) {
+          throw new Error('图片中的文本信息超过 2 MB。');
+        }
+        addPromptField(fields, key, value);
+      }
+    } else if (type === 'XMP ') {
+      hasXmp = true;
+    } else if (type === 'ALPH') {
+      hasAlpha = true;
     }
     offset = start + length + (length & 1);
   }
   if (!width || !height) throw new Error('WebP 缺少可识别的图片尺寸。');
   if (width * height > webPromptLimits.pixels) throw new Error('原图最多支持 800 万像素。');
-  return { kind: 'webp', width, height, hasAlpha, hasExif, fields: new Map() };
+  return { kind: 'webp', width, height, hasAlpha, hasExif, hasXmp, exifError, fields };
+}
+
+function parseJpegMetadata(buffer) {
+  const bytes = new Uint8Array(buffer);
+  if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) {
+    throw new Error('文件不是有效的 JPEG 原图。');
+  }
+  const data = new DataView(buffer);
+  const fields = new Map();
+  const frameMarkers = new Set([
+    0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7,
+    0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf,
+  ]);
+  const xmpSignature = 'http://ns.adobe.com/xap/1.0/\0';
+  let width = 0;
+  let height = 0;
+  let hasExif = false;
+  let hasXmp = false;
+  let hasComment = false;
+  let exifError = '';
+  let metadataBytes = 0;
+  let reachedImage = false;
+  for (let offset = 2, segmentCount = 0; offset < bytes.length; segmentCount++) {
+    if (segmentCount >= 10000) throw new Error('JPEG 标记段过多。');
+    if (offset + 2 > bytes.length || bytes[offset] !== 0xff) {
+      throw new Error('JPEG 标记段结构异常。');
+    }
+    while (offset < bytes.length && bytes[offset] === 0xff) offset++;
+    if (offset >= bytes.length) throw new Error('JPEG 文件不完整。');
+    const marker = bytes[offset++];
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+    if (marker === 0xd9) break;
+    if (marker === 0x00 || marker === 0xd8) throw new Error('JPEG 标记段结构异常。');
+    if (offset + 2 > bytes.length) throw new Error('JPEG 标记段不完整。');
+    const length = data.getUint16(offset, false);
+    if (length < 2 || length > bytes.length - offset) {
+      throw new Error('JPEG 标记段长度异常，原图可能不完整。');
+    }
+    const payloadStart = offset + 2;
+    const payloadEnd = offset + length;
+    if (marker === 0xda) { reachedImage = true; break; }
+    if (marker === 0xe1 && payloadEnd - payloadStart >= 6
+      && promptAscii(bytes, payloadStart, payloadStart + 6) === 'Exif\0\0') {
+      hasExif = true;
+      let exifFields;
+      try {
+        exifFields = parsePromptExif(bytes, data, payloadStart + 6, payloadEnd);
+      } catch (error) {
+        exifError ||= error.message;
+        offset = payloadEnd;
+        continue;
+      }
+      for (const [key, value] of exifFields) {
+        metadataBytes += promptTextBytes(value);
+        if (metadataBytes > webPromptLimits.metadataBytes) {
+          throw new Error('图片中的文本信息超过 2 MB。');
+        }
+        addPromptField(fields, key, value);
+      }
+    } else if (marker === 0xe1 && payloadEnd - payloadStart >= xmpSignature.length
+      && promptAscii(bytes, payloadStart, payloadStart + xmpSignature.length) === xmpSignature) {
+      hasXmp = true;
+    } else if (marker === 0xfe) {
+      hasComment = true;
+      const value = promptStripTrailingNul(
+        decodePromptUtf8Loose(bytes, payloadStart, payloadEnd),
+      );
+      metadataBytes += promptTextBytes(value);
+      if (metadataBytes > webPromptLimits.metadataBytes) {
+        throw new Error('图片中的文本信息超过 2 MB。');
+      }
+      if (value) addPromptField(fields, 'COM', value);
+    } else if (frameMarkers.has(marker)) {
+      if (length < 8) throw new Error('JPEG 尺寸标记不完整。');
+      const frameHeight = data.getUint16(payloadStart + 1, false);
+      const frameWidth = data.getUint16(payloadStart + 3, false);
+      if (!frameWidth || !frameHeight) throw new Error('JPEG 尺寸标记无效。');
+      width ||= frameWidth;
+      height ||= frameHeight;
+    }
+    offset = payloadEnd;
+  }
+  if (!width || !height) throw new Error('JPEG 缺少可识别的图片尺寸。');
+  if (width * height > webPromptLimits.pixels) throw new Error('原图最多支持 800 万像素。');
+  if (!reachedImage) throw new Error('JPEG 文件缺少图片数据。');
+  return { kind: 'jpeg', width, height, hasExif, hasXmp, hasComment, exifError, fields };
 }
 
 function safePromptJsonDepth(value) {
@@ -358,7 +627,7 @@ function setPromptObjectValue(target, key, value) {
 function deepMergePromptObject(target, source) {
   for (const [key, incoming] of Object.entries(source || {})) {
     if (incoming == null) continue;
-    const current = target[key];
+    const current = Object.hasOwn(target, key) ? target[key] : undefined;
     if (current && typeof current === 'object' && !Array.isArray(current)
       && incoming && typeof incoming === 'object' && !Array.isArray(incoming)) {
       deepMergePromptObject(current, incoming);
@@ -422,6 +691,7 @@ function promptSourcePriority(key) {
   if ([...promptParameterWrappers].filter((name) => name !== 'request' && name !== 'comment').includes(compactPromptKey(key))) return 90;
   if (/^(?:UserComment|EXIF:UserComment)$/i.test(key)) return 80;
   if (/^COM(?:\.|$)/i.test(key)) return 70;
+  if (/^XPComment(?:\.|$)/i.test(key)) return 60;
   if (/^(?:Description|ImageDescription)$/i.test(key)) return 20;
   return 0;
 }
@@ -521,7 +791,8 @@ function summarizeNovelAiFields(fields, metadataType = 'image metadata', missing
     || firstPlainPromptField(fields, ['Source', 'Software', 'Make', 'Model']);
   const found = Boolean(prompt || negativePrompt || actualPrompt || actualNegativePrompt
     || characters.length || negativeCharacters.length);
-  const rawComment = best?.raw || firstPlainPromptField(fields, ['Comment', 'UserComment', 'EXIF:UserComment', 'COM', 'JPEG:COM']);
+  const rawComment = best?.raw || firstPlainPromptField(fields,
+    ['Comment', 'UserComment', 'EXIF:UserComment', 'COM', 'JPEG:COM', 'XPComment']);
   const metadata = Object.fromEntries(promptFieldEntries(fields).map(([key, value]) => [key, String(value)]));
   const result = {
     found,
@@ -688,9 +959,13 @@ function promptThumbnail(source, width, height) {
 async function inspectPromptImagePixels(file, image) {
   const decoded = await loadPromptImageSource(file);
   let canvas = null;
+  let preview = null;
   try {
     const sourceWidth = decoded.source.naturalWidth || decoded.source.width;
     const sourceHeight = decoded.source.naturalHeight || decoded.source.height;
+    preview = promptThumbnail(decoded.source, sourceWidth, sourceHeight);
+    const canReadAlpha = image.kind === 'png' ? [3, 4, 6].includes(image.colorType) : image.hasAlpha;
+    if (!canReadAlpha) return { preview };
     if (sourceWidth !== image.width || sourceHeight !== image.height) {
       throw new Error('图片尺寸与文件头不一致。');
     }
@@ -706,11 +981,22 @@ async function inspectPromptImagePixels(file, image) {
       image.height,
       (x, y) => pixels[(y * image.width + x) * 4 + 3],
     );
-    return { fields, preview: promptThumbnail(decoded.source, image.width, image.height) };
+    return { fields, preview };
+  } catch (error) {
+    return { preview, alphaReadError: error?.message || '无法读取透明通道中的隐藏信息。' };
   } finally {
     canvas?.remove();
     decoded.close();
   }
+}
+
+function promptImageMetadataType(image, hasHiddenFields) {
+  const labels = [];
+  if (image.kind === 'png') labels.push('PNG 文本');
+  if (image.hasExif) labels.push('EXIF');
+  if (image.hasComment) labels.push('JPEG COM');
+  if (hasHiddenFields) labels.push('透明通道隐藏信息');
+  return labels.join(' + ') || image.kind.toUpperCase();
 }
 
 async function readLocalNovelAiImage(file) {
@@ -728,42 +1014,28 @@ async function readLocalNovelAiImage(file) {
   } else if (bytes.length >= 12 && promptAscii(bytes, 0, 4) === 'RIFF'
     && promptAscii(bytes, 8, 12) === 'WEBP') {
     image = parseWebpMetadata(buffer);
+  } else if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xd8) {
+    image = parseJpegMetadata(buffer);
   } else {
-    throw new Error('目前支持本地读取 NovelAI 保存的 PNG 或 WebP 原图。');
+    throw new Error('目前支持本地读取 NovelAI 保存的 PNG、WebP 或 JPEG 原图。');
   }
 
   let hiddenFields = new Map();
   let preview = null;
-  let alphaReadError = '';
+  let pixelError = '';
   try {
     const pixels = await inspectPromptImagePixels(file, image);
     hiddenFields = pixels.fields || new Map();
     preview = pixels.preview;
+    pixelError = pixels.alphaReadError || '';
   } catch (error) {
-    alphaReadError = error?.message || '无法读取图片透明通道中的隐藏信息。';
+    pixelError = error?.message || '无法显示这张图片的预览。';
   }
   const fields = mergePromptFields(image.fields, hiddenFields);
-  const baseType = image.kind === 'png' ? 'PNG text' : image.hasAlpha ? 'WebP alpha' : 'WebP';
-  const metadataType = hiddenFields.size
-    ? `${image.kind === 'png' ? 'PNG text' : 'WebP'} alpha stealth`
-    : baseType;
-  const webpReason = image.kind === 'webp'
-    ? (image.hasExif
-      ? '检测到 WebP EXIF，但当前 Windows 本地导入尚未解析 WebP EXIF；仅尝试了透明通道隐写，原图未上传。'
-      : 'WebP 当前仅尝试透明通道隐写，尚未解析 WebP EXIF；原图未上传。')
-    : '';
-  const summary = summarizeNovelAiFields(fields, metadataType, webpReason);
+  const missingReason = image.exifError || pixelError
+    || (image.hasXmp ? '这张图含 XMP，本版尚无法从中提取生成参数。' : '');
+  const summary = summarizeNovelAiFields(fields, promptImageMetadataType(image, hiddenFields.size), missingReason);
   if (preview) summary.preview = preview;
-  if (alphaReadError) {
-    summary.alphaReadError = alphaReadError;
-    if (!summary.found) summary.message = summary.missingReason = alphaReadError;
-  }
-  if (image.kind === 'webp') {
-    summary.webpExifDetected = image.hasExif;
-    if (!summary.found && !alphaReadError) {
-      summary.message = summary.missingReason = webpReason;
-    }
-  }
   return summary;
 }
 

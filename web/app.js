@@ -2185,7 +2185,7 @@ function showPhotos(card, initialIndex = 0, detailBack = null) {
     };
     photo.replaceChildren(status, img);
     metadata.replaceChildren();
-    if (window.Pocket && canReadPhotoMetadata(ref.url)) {
+    if (canReadPhotoMetadata(ref.url) && (window.Pocket || (desktopApp && !ref.url.startsWith('/pack-image/')))) {
       const readMetadata = button('查看这张图的提示词与参数', 'soft', async () => {
         const revision = screenRevision;
         const activeRequest = ++metadataRequest;
@@ -2193,7 +2193,16 @@ function showPhotos(card, initialIndex = 0, detailBack = null) {
         readMetadata.textContent = '正在读取提示词与参数…';
         readMetadata.setAttribute('aria-busy', 'true');
         try {
-          const data = await native('photoMetadata', ref.url);
+          let data;
+          if (window.Pocket) {
+            data = await native('photoMetadata', ref.url);
+          } else {
+            const response = await fetch(ref.url, { mode: 'same-origin', redirect: 'error' });
+            if (!response.ok) throw new Error('无法读取这张样图，请检查网络后重试。');
+            const image = await response.blob();
+            if (revision !== screenRevision || activeRequest !== metadataRequest) return;
+            data = await readLocalNovelAiImage(image);
+          }
           if (revision !== screenRevision || photoIndex !== index || activeRequest !== metadataRequest || readMetadata.parentNode !== metadata) return;
           if (!data || typeof data !== 'object') throw new Error('没有收到这张样图的读取结果。');
           showPromptImport(data, {
@@ -2627,7 +2636,7 @@ function showDesktopGallery() {
 function showTools(initialUpdate) {
   openScreen('设置与工具');
   const image = toolSection('导入原图生成信息', desktopApp
-    ? '选择 NovelAI 保存的 PNG 或 WebP 原图，在电脑上查看和复制生成参数。'
+    ? '选择 PNG、WebP 或 JPEG 原图，在电脑上查看和复制图片中保存的生成参数。'
     : '选择 NovelAI 保存的 PNG 或 WebP 原图，逐项复制提示词和生成参数。也可保存小预览和生成信息到图库。');
   image.append(button('选择原图', 'primary', readImagePrompts));
   const codex = toolSection('法典图鉴',
@@ -2781,7 +2790,9 @@ function showTools(initialUpdate) {
   }).catch((error) => { version.textContent = error.message; });
   else {
     if (desktopApp) {
-      version.remove();
+      getJson('/api/desktop.json').then((info) => {
+        version.textContent = info?.version ? `当前 Windows 版本 ${info.version}` : 'Windows 便携版';
+      }).catch(() => { version.textContent = 'Windows 便携版'; });
       repo.closest('.field')?.remove();
       controls.replaceChildren(button('打开 Windows 下载页', 'soft', () =>
         openLink('https://github.com/oju706/nai-pocket-library/tree/main/release')));

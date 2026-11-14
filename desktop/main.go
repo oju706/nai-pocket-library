@@ -29,7 +29,7 @@ import (
 
 const (
 	appID       = "nai-pocket-library.desktop"
-	appVersion  = "1.3.20"
+	appVersion  = "1.3.21"
 	desktopHost = "127.0.0.1:17619"
 	desktopURL  = "http://" + desktopHost
 	homeURL     = desktopURL + "/index.html"

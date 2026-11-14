@@ -8,6 +8,11 @@
 
 「在 App 内打开官网」会在独立的网页页签保留站点自己的搜索、登录和浏览方式。Gelbooru 的图库接口需要用户 ID 和 API Key，直接打开官网可使用站点自己的访问方式。来源选择参考 [NAI Launcher v4.3.1](https://github.com/Aaalice233/Aaalice_NAI_Launcher/releases/tag/v4.3.1)。
 
+## 1.3.21 · Windows
+
+- 修复 Windows 原图导入，支持读取 WebP EXIF 与 JPEG EXIF／COM。PNG 文本和 PNG、WebP 的透明通道隐藏信息继续可读。
+- 韩国主库和 NAX 的样图详情可直接打开提示词与参数。图片没有生成信息时仍可查看预览。
+
 ## 1.3.20
 
 - Windows 便携版支持韩国画师目录、按需样图、NAX 补充、个人词库、随机工坊和原图提示词读取。手动下载更新 ZIP。Android 继续使用应用内更新。
