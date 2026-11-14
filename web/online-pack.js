@@ -14,11 +14,43 @@
   let recentRecords = null;
   const unmarkedDate = '__unmarked_date__';
 
-  async function desktopPackResponse(url) {
-    const response = await fetch(url, { cache: 'no-store', mode: 'same-origin', redirect: 'error' });
+  async function desktopPackResponse(url, options) {
+    const response = await fetch(url, { cache: 'no-store', mode: 'same-origin', redirect: 'error', ...options });
     if (response.ok) return response;
     const details = await response.json().catch(() => null);
     throw new Error(details?.error || '暂时无法读取图包，请重试。');
+  }
+
+  async function desktopLocalPack(action) {
+    if (action === 'openSharedStylePack') {
+      return (await desktopPackResponse('/api/local-zip/catalog')).json();
+    }
+    if (action === 'forgetSharedStylePack') {
+      return (await desktopPackResponse('/api/local-zip/remove', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      })).json();
+    }
+    const input = node('input');
+    input.type = 'file';
+    input.accept = '.zip,application/zip';
+    input.hidden = true;
+    const selected = await new Promise((resolve, reject) => {
+      const finish = (file) => { input.remove(); resolve(file); };
+      input.addEventListener('change', () => finish(input.files[0] || null), { once: true });
+      input.addEventListener('cancel', () => finish(null), { once: true });
+      body.append(input);
+      try { input.click(); }
+      catch (error) { input.remove(); reject(error); }
+    });
+    if (!selected) return null;
+    const response = await desktopPackResponse('/api/local-zip/import', {
+      method: 'POST', headers: {
+        'Content-Type': 'application/zip',
+        'X-Pocket-Filename': encodeURIComponent(selected.name),
+      },
+      body: selected,
+    });
+    return response.json();
   }
 
   async function downloadDesktopPhotos(mode, revision, ids) {
@@ -249,7 +281,7 @@
       saving = true;
       updateSave();
       try {
-        const result = desktopApp ? await downloadDesktopPhotos(remote ? 'community' : 'github', revision, ids)
+        const result = desktopApp ? await downloadDesktopPhotos(remote ? 'community' : local ? 'local' : 'github', revision, ids)
           : await native(saveAction, JSON.stringify({ revision, ids }));
         if (screen !== screenRevision) return;
         if (result === true) toast(desktopApp ? '已发起下载'
@@ -463,7 +495,7 @@
 
     function showList() {
       openScreen(packLabel, back);
-      if (!window.Pocket && (!desktopApp || local)) {
+      if (!window.Pocket && !desktopApp) {
         body.append(node('p', 'online-pack-note', `请在安卓 App 中打开${packLabel}。`));
         return;
       }
@@ -489,7 +521,7 @@
       const searchField = field('搜索原帖编号或标题', search);
       const importZip = button('选择画风 ZIP', 'primary compact', () => loadShared('importSharedStylePack'));
       const forgetZip = button('移除图包', 'soft compact', () => {
-        if (confirm('移除 App 中的共享图包？手机原 ZIP 文件会保留。')) return loadShared('forgetSharedStylePack');
+        if (confirm('移除应用里的图包？原 ZIP 文件会保留。')) return loadShared('forgetSharedStylePack');
       });
       const retry = button(presetMode ? '重试读取图包' : '重试读取在线图包', 'primary compact', () => loadCatalog(address, true));
       retry.hidden = true;
@@ -497,13 +529,15 @@
         const tools = node('div', 'online-pack-heading');
         if (remote) {
           tools.append(retry);
-          if (!desktopApp) tools.append(button('导入本地 ZIP', 'soft compact', () => showPack(showList, 'local')));
+          tools.append(button('导入本地 ZIP', 'soft compact', () => showPack(showList, 'local')));
           tools.append(button('自定义 GitHub 仓库', 'soft compact', () => showPack(showList, 'custom')));
         } else {
           tools.append(importZip, forgetZip);
         }
-        tools.append(button('下载完整 ZIP', 'soft compact', () => openLink(catalog?.downloadUrl || sharedZipUrl)));
-        const description = remote ? '直接读取内置社区图包目录，图片按需加载。' : '支持社区画风合集和画风测试 ZIP，按需浏览包内图片。';
+        if (remote) tools.append(button('下载完整 ZIP', 'soft compact', () => openLink(catalog?.downloadUrl || sharedZipUrl)));
+        const description = remote ? '直接读取内置社区图包目录，图片按需加载。'
+          : desktopApp ? '支持社区画风、画风测试和普通图片 ZIP。导入后可离线浏览和下载单张原图。'
+            : '支持社区画风合集和画风测试 ZIP，按需浏览包内图片。';
         source.append(node('p', 'online-pack-note', description), tools, searchField, status);
       } else if (presetMode) {
         source.append(node('p', 'online-pack-note', '这个远程图库入口会自动读取目录；图片按需加载，原图和提示词读取沿用在线图包缓存。'), status, retry);
@@ -790,7 +824,7 @@
         content.replaceChildren();
         actions.replaceChildren();
         try {
-          const result = await native(action);
+          const result = desktopApp ? await desktopLocalPack(action) : await native(action);
           if (screen !== screenRevision) return;
           if (action === 'forgetSharedStylePack') {
             if (result !== true) throw new Error('没有收到移除结果。');

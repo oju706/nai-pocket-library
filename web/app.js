@@ -529,6 +529,24 @@ let tagDictionaryFlushRunning = false;
 let tagDictionaryGeneration = 0;
 const tagDictionaryBatchSize = 200;
 
+async function tagDictionaryRequest(action, keys = []) {
+  if (!desktopApp) return native(action, action === 'tagDictionaryLookup' ? JSON.stringify(keys) : null);
+  const path = {
+    tagDictionaryStatus: 'status', tagDictionaryInstall: 'install',
+    tagDictionaryRemove: 'remove', tagDictionaryLookup: 'lookup',
+  }[action];
+  const method = path === 'status' ? 'GET' : 'POST';
+  const options = { method, mode: 'same-origin', redirect: 'error', cache: 'no-store' };
+  if (method === 'POST') {
+    options.headers = { 'Content-Type': 'application/json' };
+    options.body = JSON.stringify(path === 'lookup' ? keys : {});
+  }
+  const response = await fetch('/api/tag-dictionary/' + path, options);
+  const result = await response.json().catch(() => null);
+  if (!response.ok || !result) throw new Error(result?.error || '暂时无法读取本机词典。');
+  return result;
+}
+
 function tagDictionaryKey(value) {
   return PocketSources.tagGalleryTag(value);
 }
@@ -557,7 +575,8 @@ function tagDictionarySettleWaiters() {
 }
 
 function tagDictionaryScheduleFlush() {
-  if (tagDictionaryFlushRunning || tagDictionaryFlushTimer || !tagDictionaryQueue.size || !window.Pocket) return;
+  if (tagDictionaryFlushRunning || tagDictionaryFlushTimer || !tagDictionaryQueue.size
+    || (!window.Pocket && !desktopApp)) return;
   tagDictionaryFlushTimer = setTimeout(tagDictionaryFlush, 16);
 }
 
@@ -572,7 +591,7 @@ async function tagDictionaryFlush() {
       for (const key of keys) tagDictionaryQueue.delete(key);
       let payload = {};
       try {
-        const returned = await native('tagDictionaryLookup', JSON.stringify(keys));
+        const returned = await tagDictionaryRequest('tagDictionaryLookup', keys);
         if (returned && typeof returned === 'object' && !Array.isArray(returned)) payload = returned;
       } catch {
         // A missing or damaged dictionary quietly leaves every original tag untouched.
@@ -595,7 +614,7 @@ async function tagDictionaryFlush() {
 
 function tagDictionaryLookup(values) {
   const keys = tagDictionaryUniqueKeys(values);
-  if (!keys.length || !window.Pocket) return Promise.resolve(tagDictionarySnapshot(keys));
+  if (!keys.length || (!window.Pocket && !desktopApp)) return Promise.resolve(tagDictionarySnapshot(keys));
   const missing = keys.filter((key) => !tagDictionaryTranslations.has(key));
   if (!missing.length) return Promise.resolve(tagDictionarySnapshot(keys));
   return new Promise((resolve) => {
@@ -667,7 +686,7 @@ function showTagDictionarySettings(back = null) {
   let busy = false;
   let busyLabel = '';
   let failure = '';
-  let readingStatus = Boolean(window.Pocket);
+  let readingStatus = Boolean(window.Pocket || desktopApp);
 
   function renderStatus() {
     const installedBytes = Number(info?.bytes) || 0;
@@ -686,7 +705,7 @@ function showTagDictionarySettings(back = null) {
     }
     status.classList.toggle('danger', Boolean(failure));
     controls.replaceChildren();
-    if (!window.Pocket) {
+    if (!window.Pocket && !desktopApp) {
       controls.append(node('span', 'muted', '浏览器预览不安装本地词典，请在 Android App 中使用。'));
       return;
     }
@@ -715,9 +734,10 @@ function showTagDictionarySettings(back = null) {
     failure = '';
     renderStatus();
     try {
-      const result = await native(action);
+      const result = await tagDictionaryRequest(action);
       if (action === 'tagDictionaryInstall' || action === 'tagDictionaryRemove') {
         tagDictionaryClearCache();
+        if (desktopApp) renderList();
       }
       if (revision !== screenRevision) return;
       info = result;
@@ -734,8 +754,8 @@ function showTagDictionarySettings(back = null) {
   }
 
   renderStatus();
-  if (window.Pocket) {
-    native('tagDictionaryStatus').then((result) => {
+  if (window.Pocket || desktopApp) {
+    tagDictionaryRequest('tagDictionaryStatus').then((result) => {
       if (revision !== screenRevision) return;
       readingStatus = false;
       info = result;
@@ -1223,6 +1243,7 @@ function showPackSources(back = null) {
     }
     const controls = node('div', 'tool-actions');
     controls.append(button('在线社区画风', 'soft', () => showRemoteSharedStylePack(restore)),
+      button('导入本地 ZIP', 'soft', () => showSharedStylePack(restore)),
       button('自定义 GitHub 图包', 'soft', () => showOnlinePack(restore)),
       button('刷新入口', 'text-button', async () => {
         const current = screenRevision;
@@ -2666,9 +2687,8 @@ function showTools(initialUpdate) {
       : '浏览器预览不保存图库凭据，请在 Android App 中配置。'));
   }
   const dictionary = toolSection('中文标签词典',
-    desktopApp ? 'Windows 版显示原始标签。安卓可安装 ffdkj 丹波鲁中英词典。'
-      : '可选下载 ffdkj 丹波鲁中英词典，在 D 站标签、词库原词、参考标签和画风串旁显示中文译名。约 25 MB，仅在你点击后下载；原词与复制内容保持不变。');
-  dictionary.append(button(window.Pocket ? '打开词典安装与管理' : '查看词典说明', window.Pocket
+    '下载约 25 MB 的 ffdkj 丹波鲁中英词典，在 D 站标签、词库原词、参考标签和画风串旁显示中文译名。复制时使用原始标签。');
+  dictionary.append(button(window.Pocket || desktopApp ? '打开词典安装与管理' : '查看词典说明', window.Pocket || desktopApp
     ? 'soft' : 'subtle', () => showTagDictionarySettings(() => showTools(initialUpdate))));
   const backup = toolSection('个人词库备份', '备份收藏、自己写的条目和自选配图。图库原图请单独保留，换机后可重新导入。');
   const backupActions = node('div', 'tool-actions');

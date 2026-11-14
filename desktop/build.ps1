@@ -37,6 +37,7 @@ foreach ($file in $assets) {
     Copy-Item -LiteralPath (Join-Path (Join-Path $project 'web') $file) -Destination $web
 }
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'README.md') -Destination $contents
+Copy-Item -LiteralPath (Join-Path $project 'docs/ffdkj-MIT.txt') -Destination $contents
 $zipPath = Join-Path $buildPath $zipName
 Compress-Archive -LiteralPath $contents -DestinationPath $zipPath -CompressionLevel Optimal
 $output = Join-Path $destinationPath $zipName

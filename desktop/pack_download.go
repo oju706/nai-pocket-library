@@ -27,6 +27,8 @@ func (app *application) servePackDownload(writer http.ResponseWriter, request *h
 		readPhoto, countBytes = app.onlinePacks.photo, app.onlinePacks.photoSize
 	case "community":
 		readPhoto, countBytes = app.community.photo, app.community.photoSize
+	case "local":
+		readPhoto, countBytes = app.localZip.photo, app.localZip.photoSize
 	default:
 		writeRouteFailure(writer, request, badRequest("图包来源无效。"))
 		return

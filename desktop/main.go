@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -29,7 +30,7 @@ import (
 
 const (
 	appID       = "nai-pocket-library.desktop"
-	appVersion  = "1.3.22"
+	appVersion  = "1.3.23"
 	desktopPort = 17619
 
 	contentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
@@ -73,6 +74,8 @@ type application struct {
 	danbooru    *http.ServeMux
 	onlinePacks *onlinePackLibrary
 	community   *communityZip
+	dictionary  *desktopDictionary
+	localZip    *localZip
 }
 
 func newApplication(webRoot, cacheRoot string, port int) *application {
@@ -86,6 +89,8 @@ func newApplication(webRoot, cacheRoot string, port int) *application {
 		danbooru:    galleries,
 		onlinePacks: newOnlinePackLibrary(cacheRoot),
 		community:   newCommunityZip(webRoot, cacheRoot),
+		dictionary:  newDesktopDictionary(cacheRoot),
+		localZip:    newLocalZip(cacheRoot, webRoot),
 	}
 }
 
@@ -378,6 +383,9 @@ func (app *application) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		writeAPIFailure(writer, request, http.StatusBadRequest, "路径无效")
 		return
 	}
+	if request.Method == http.MethodPost && app.serveLocalPost(writer, request) {
+		return
+	}
 	if request.Method != http.MethodGet && request.Method != http.MethodHead {
 		headers.Set("Allow", "GET, HEAD")
 		writeAPIFailure(writer, request, http.StatusMethodNotAllowed, "仅支持 GET 和 HEAD")
@@ -424,6 +432,12 @@ func (app *application) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	case "/api/online-pack-download":
 		app.servePackDownload(writer, request)
 		return
+	case "/api/tag-dictionary/status":
+		app.dictionary.ServeHTTP(writer, request)
+		return
+	case "/api/local-zip/catalog":
+		app.localZip.ServeHTTP(writer, request)
+		return
 	case "/api/tag-gallery/posts", "/api/tag-gallery/tags":
 		app.danbooru.ServeHTTP(writer, request)
 		return
@@ -450,11 +464,59 @@ func (app *application) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		app.community.ServeHTTP(writer, request)
 		return
 	}
+	if strings.HasPrefix(request.URL.Path, "/local-zip-photo/") {
+		app.localZip.ServeHTTP(writer, request)
+		return
+	}
 	if strings.HasPrefix(request.URL.Path, "/api/") {
 		writeAPIFailure(writer, request, http.StatusNotFound, "接口不存在")
 		return
 	}
 	app.serveStatic(writer, request)
+}
+
+func (app *application) serveLocalPost(writer http.ResponseWriter, request *http.Request) bool {
+	var handler http.Handler
+	expected := "application/json"
+	limit := int64(256 * 1024)
+	timeout := 10 * time.Second
+	switch request.URL.Path {
+	case "/api/tag-dictionary/install":
+		timeout = 5 * time.Minute
+		handler = app.dictionary
+	case "/api/tag-dictionary/remove", "/api/tag-dictionary/lookup":
+		handler = app.dictionary
+	case "/api/local-zip/remove":
+		handler = app.localZip
+	case "/api/local-zip/import":
+		handler = app.localZip
+		expected = "application/zip"
+		limit = 2 * 1024 * 1024 * 1024
+		timeout = 3 * time.Minute
+	default:
+		return false
+	}
+	if request.Header.Get("Origin") != "http://"+desktopAddress(app.port) {
+		writeAPIFailure(writer, request, http.StatusForbidden, "请求来源不受支持")
+		return true
+	}
+	contentType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
+	if err != nil || contentType != expected {
+		writeAPIFailure(writer, request, http.StatusUnsupportedMediaType, "请求文件类型不受支持")
+		return true
+	}
+	if request.ContentLength > limit {
+		writeAPIFailure(writer, request, http.StatusRequestEntityTooLarge, "文件超过允许大小")
+		return true
+	}
+	request.Body = http.MaxBytesReader(writer, request.Body, limit)
+	if timeout > 10*time.Second {
+		controller := http.NewResponseController(writer)
+		_ = controller.SetReadDeadline(time.Now().Add(timeout))
+		_ = controller.SetWriteDeadline(time.Now().Add(timeout + 10*time.Second))
+	}
+	handler.ServeHTTP(writer, request)
+	return true
 }
 
 type desktopMarker struct {
