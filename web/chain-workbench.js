@@ -5,10 +5,18 @@ const artistDrawBatchSize = 10;
 const artistDrawStoragePrefix = 'pocket-artist-draw-v1';
 const artistChainLegacyStorageKey = 'pocket-artist-chain-v1';
 const artistChainStorageKey = 'pocket-artist-chain-v2';
+const artistMixerStorageKey = 'pocket-artist-mixer-v1';
 const artistChainModels = ['V5', 'V4.5'];
 const artistChainCapacity = 256;
 const artistChainCopiesPerModel = 8;
 const artistChainCopyNameMaxLength = 32;
+const artistMixerPoolCapacity = 512;
+const mixerInitialSlots = [[0.9, 1.2, 1], [0.6, 0.9, 0.8], [0.5, 0.8, 0.7], [0.4, 0.7, 0.5]];
+const artistMixerResultCapacity = 300;
+const artistMixerNameMaxLength = 40;
+const artistMixerNoteMaxLength = 500;
+const artistMixerPoolPageSize = 24;
+const artistMixerResultPageSize = 6;
 const artistDrawPoolConfig = [
   {
     id: 'filtered',
@@ -524,9 +532,9 @@ function normalizeArtistChainTag(value, { escapeCommas = false } = {}) {
   if (tag.includes('|')) return { error: '画风串不支持 |，请只输入单个画师标签。' };
   if (/[\[\]{}]/.test(tag)) return { error: '画师标签不能包含 [] 或 {}。' };
   if (tag.endsWith('\\')) return { error: '画师标签末尾不能是孤立的反斜杠。' };
-  if (escapeCommas) tag = artistChainEscapeCommas(tag);
   const structureError = inspectArtistChainTag(tag);
   if (structureError) return { error: structureError };
+  if (escapeCommas) tag = artistChainEscapeCommas(tag);
   const key = artistTagKey(tag);
   if (!key) return { error: '画师标签需要包含可识别的文字。' };
   return { tag, key };
@@ -768,6 +776,12 @@ function openArtistChainWorkbench({
     modelControls.append(control);
   }
   modelControls.setAttribute('aria-label', '画风串模型草稿');
+  modelControls.append(button('随机画风工坊', 'soft compact mixer-open-button', () => {
+    openArtistMixer({
+      model: activeModel,
+      back: () => openArtistChainWorkbench({ back, defaultModel: activeModel }),
+    });
+  }));
 
   const copiesSection = node('section', 'artist-chain-copies');
   const copiesHeading = node('div', 'artist-chain-copies-heading');
@@ -1326,6 +1340,626 @@ function openArtistChainWorkbench({
   }
 }
 
+let artistMixerDraftCache = null;
+let artistMixerStorageMessage = '';
+let artistMixerStorageUnavailable = false;
+let artistMixerSession = null;
+
+function mixerModel(value) {
+  const text = String(value ?? '');
+  if (/V5/i.test(text)) return 'V5';
+  if (/V4\.5/i.test(text)) return 'V4.5';
+  return '';
+}
+
+function mixerRoundWeight(value) {
+  return Math.max(0, Math.min(3, Math.round(Number(value) * 100) / 100));
+}
+
+function mixerInteger(value, min, max, fallback) {
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= min && number <= max ? number : fallback;
+}
+
+function normalizeArtistMixerName(value) {
+  if (typeof value !== 'string') return { error: '请输入画师池名称。' };
+  const name = value.normalize('NFKC').trim().replace(/\s+/g, ' ');
+  if (!name) return { error: '请输入画师池名称。' };
+  if (name.length > artistMixerNameMaxLength) {
+    return { error: `画师池名称最多 ${artistMixerNameMaxLength} 个字符。` };
+  }
+  return { name };
+}
+
+function normalizeArtistMixerNote(value) {
+  if (value === undefined || value === null) return '';
+  if (typeof value !== 'string') return null;
+  const note = value.normalize('NFKC').trim();
+  return note.length <= artistMixerNoteMaxLength ? note : null;
+}
+
+function emptyArtistMixerSettings() {
+  return {
+    perChain: 4,
+    batchCount: 3,
+    step: 0.1,
+    sortMode: 'unlocked',
+    artistPrefix: true,
+    syntax: 'numeric',
+    slotArtists: Array(10).fill(''),
+    slotWeights: Array.from({ length: 10 }, (_, i) => {
+      const [minWeight, maxWeight, fixedWeight] = mixerInitialSlots[i] || [0.5, 1.1, 0.8];
+      return { weightMode: 'range', minWeight, maxWeight, fixedWeight };
+    }),
+  };
+}
+
+function emptyArtistMixerDraft() {
+  const draft = {
+    format: 'nai-pocket-artist-mixer',
+    version: 1,
+    selectedModel: 'V5',
+    pools: {},
+    activePoolIds: {},
+    settings: {},
+    results: {},
+    nextPoolId: 1,
+    nextResultId: 1,
+  };
+  for (const model of artistChainModels) {
+    const pool = { id: `pool-${model.replace('.', '_')}-0`, name: `${model} 默认池`, artists: [] };
+    draft.pools[model] = [pool];
+    draft.activePoolIds[model] = pool.id;
+    draft.settings[model] = emptyArtistMixerSettings();
+    draft.results[model] = [];
+  }
+  return draft;
+}
+
+function mixerStripOuterBrackets(value) {
+  const open = value[0];
+  if (open !== '{' && open !== '[') return null;
+  const close = open === '{' ? '}' : ']';
+  if (value[value.length - 1] !== close) return null;
+  let depth = 0;
+  for (let index = 0; index < value.length; index++) {
+    const character = value[index];
+    if (character === '\\') {
+      index++;
+      continue;
+    }
+    if (character === open) depth++;
+    if (character === close) depth--;
+    if (depth === 0 && index !== value.length - 1) return null;
+  }
+  return depth === 0 ? value.slice(1, -1).trim() : null;
+}
+
+function parseArtistMixerFixedValue(value) {
+  let text = String(value ?? '').normalize('NFKC').trim();
+  if (!text) return { error: '请输入一位完整画师标签。' };
+  let numericWeight = null;
+  const numeric = /^([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*::\s*([\s\S]*)$/.exec(text);
+  if (numeric) {
+    numericWeight = Number(numeric[1]);
+    text = numeric[2].trim().replace(/\s*::$/, '').trim();
+    if (!isArtistChainWeight(numericWeight)) return { error: '数值倍率需在 0–3 之间，最多两位小数。' };
+  }
+  let factor = 1;
+  let layers = 0;
+  let stripped = mixerStripOuterBrackets(text);
+  while (stripped !== null) {
+    const open = text[0];
+    factor *= open === '{' ? 1.05 : 1 / 1.05;
+    layers++;
+    text = stripped;
+    if (!text || layers > 64) break;
+    stripped = mixerStripOuterBrackets(text);
+  }
+  if (!text) return { error: '括号里需要一位完整画师标签。' };
+  if (layers > 64) return { error: '花括号或方括号层数过多。' };
+  if (layers && numericWeight === 0) {
+    return { error: '0 倍率无法用花括号或方括号近似，请改用 0::artist:tag :: 的数值写法。' };
+  }
+  const normalized = normalizeArtistChainTag(text, { escapeCommas: true });
+  if (normalized.error) return normalized;
+  const weight = mixerRoundWeight((numericWeight ?? 1) * factor);
+  if (!isArtistChainWeight(weight)) {
+    return { error: '括号换算后的倍率需在 0–3 之间，且最多两位小数。' };
+  }
+  return {
+    ...normalized,
+    weight,
+    numericWeight,
+    approximate: layers > 0,
+  };
+}
+
+function normalizeArtistMixerArtist(value) {
+  const parsed = parseArtistMixerFixedValue(value);
+  return parsed.error ? parsed : { tag: parsed.tag, key: parsed.key };
+}
+
+function normalizeArtistMixerSettings(stored) {
+  const settings = emptyArtistMixerSettings();
+  if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return settings;
+  settings.perChain = mixerInteger(stored.perChain, 1, 10, settings.perChain);
+  settings.batchCount = mixerInteger(stored.batchCount, 1, 10, settings.batchCount);
+  settings.step = [0.01, 0.05, 0.1].includes(Number(stored.step)) ? Number(stored.step) : settings.step;
+  settings.sortMode = ['fixed', 'unlocked', 'all'].includes(stored.sortMode)
+    ? stored.sortMode : settings.sortMode;
+  settings.artistPrefix = stored.artistPrefix !== false;
+  settings.syntax = stored.syntax === 'brace' ? 'brace' : 'numeric';
+  if (Array.isArray(stored.slotWeights)) {
+    for (const [index, value] of stored.slotWeights.slice(0, 10).entries()) {
+      if (!value || typeof value !== 'object') continue;
+      const slot = settings.slotWeights[index];
+      slot.weightMode = ['range', 'fixed'].includes(value.weightMode) ? value.weightMode : 'range';
+      for (const key of ['minWeight', 'maxWeight', 'fixedWeight']) {
+        if (isArtistChainWeight(value[key])) slot[key] = value[key];
+      }
+    }
+  } else {
+    for (const slot of settings.slotWeights) {
+      slot.weightMode = stored.weightMode === 'fixed' ? 'fixed' : 'range';
+      for (const key of ['minWeight', 'maxWeight', 'fixedWeight']) {
+        if (isArtistChainWeight(stored[key])) slot[key] = stored[key];
+      }
+    }
+  }
+  if (Array.isArray(stored.slotArtists)) {
+    for (let index = 0; index < Math.min(10, stored.slotArtists.length); index++) {
+      if (typeof stored.slotArtists[index] === 'string') {
+        settings.slotArtists[index] = stored.slotArtists[index].slice(0, 512);
+      }
+    }
+  }
+  return settings;
+}
+
+function normalizeArtistMixerPool(stored, id, name) {
+  if (!stored || typeof stored !== 'object' || Array.isArray(stored)
+      || !Array.isArray(stored.artists) || stored.artists.length > artistMixerPoolCapacity) {
+    throw new Error('随机画风工坊的画师池格式不正确。');
+  }
+  const artists = [];
+  const keys = new Set();
+  for (const entry of stored.artists) {
+    const source = typeof entry === 'string' ? entry : entry?.tag;
+    const normalized = normalizeArtistMixerArtist(source);
+    if (normalized.error || keys.has(normalized.key)) continue;
+    keys.add(normalized.key);
+    artists.push(normalized);
+  }
+  return { id, name, artists };
+}
+
+function normalizeArtistMixerResult(stored, model) {
+  if (!stored || typeof stored !== 'object' || Array.isArray(stored)
+      || typeof stored.id !== 'string' || !stored.id || stored.id.length > 80
+      || stored.model !== model || !Array.isArray(stored.items)
+      || !stored.items.length || stored.items.length > 10) {
+    throw new Error('随机画风工坊的成果格式不正确。');
+  }
+  const note = normalizeArtistMixerNote(stored.note);
+  if (note === null) throw new Error('随机画风工坊成果备注过长。');
+  const items = [];
+  const keys = new Set();
+  for (const entry of stored.items) {
+    const normalized = normalizeArtistChainTag(entry?.tag, { escapeCommas: true });
+    const weight = Number(entry?.weight);
+    if (normalized.error || !isArtistChainWeight(weight) || keys.has(normalized.key)) {
+      throw new Error('随机画风工坊成果含无效或重复画师。');
+    }
+    keys.add(normalized.key);
+    items.push({ tag: normalized.tag, key: normalized.key, weight });
+  }
+  const createdAt = Number(stored.createdAt);
+  return {
+    id: stored.id,
+    model,
+    note,
+    items,
+    artistPrefix: stored.artistPrefix !== false,
+    syntax: stored.syntax === 'brace' ? 'brace' : 'numeric',
+    approximate: stored.approximate === true,
+    createdAt: Number.isSafeInteger(createdAt) && createdAt > 0 ? createdAt : Date.now(),
+  };
+}
+
+function normalizeArtistMixerDraft(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+      || value.format !== 'nai-pocket-artist-mixer' || value.version !== 1
+      || !value.pools || typeof value.pools !== 'object' || Array.isArray(value.pools)
+      || !value.results || typeof value.results !== 'object' || Array.isArray(value.results)) {
+    throw new Error('随机画风工坊存储格式不正确。');
+  }
+  const draft = emptyArtistMixerDraft();
+  const targetModel = mixerModel(value.selectedModel);
+  if (targetModel) draft.selectedModel = targetModel;
+  const nextPoolId = Number(value.nextPoolId);
+  const nextResultId = Number(value.nextResultId);
+  if (Number.isSafeInteger(nextPoolId) && nextPoolId > 0) draft.nextPoolId = nextPoolId;
+  if (Number.isSafeInteger(nextResultId) && nextResultId > 0) draft.nextResultId = nextResultId;
+  const ids = new Set();
+  for (const model of artistChainModels) {
+    const storedPools = value.pools[model];
+    if (!Array.isArray(storedPools) || !storedPools.length || storedPools.length > 40) {
+      throw new Error(`每个模型需要保存 1–40 个画师池。`);
+    }
+    const names = new Set();
+    const pools = [];
+    for (const stored of storedPools) {
+      if (!stored || typeof stored !== 'object' || Array.isArray(stored)
+          || typeof stored.id !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(stored.id)
+          || ids.has(stored.id)) {
+        throw new Error('随机画风工坊画师池标识不正确。');
+      }
+      const named = normalizeArtistMixerName(stored.name);
+      if (named.error || names.has(named.name.toLocaleLowerCase())) {
+        throw new Error('随机画风工坊画师池名称不正确或重复。');
+      }
+      ids.add(stored.id);
+      names.add(named.name.toLocaleLowerCase());
+    pools.push(normalizeArtistMixerPool(stored, stored.id, named.name));
+    }
+    draft.pools[model] = pools;
+    draft.activePoolIds[model] = pools.some((pool) => pool.id === value.activePoolIds?.[model])
+      ? value.activePoolIds[model] : pools[0].id;
+    draft.settings[model] = normalizeArtistMixerSettings(value.settings?.[model]);
+    const storedResults = value.results[model] ?? [];
+    if (!Array.isArray(storedResults) || storedResults.length > artistMixerResultCapacity) {
+      throw new Error(`每个模型最多保存 ${artistMixerResultCapacity} 条随机画风成果。`);
+    }
+    const resultIds = new Set();
+    draft.results[model] = storedResults.map((result) => {
+      const normalized = normalizeArtistMixerResult(result, model);
+      if (resultIds.has(normalized.id)) throw new Error('随机画风工坊成果标识重复。');
+      resultIds.add(normalized.id);
+      return normalized;
+    });
+  }
+  return draft;
+}
+
+function loadArtistMixerDraft({ fresh = false } = {}) {
+  if (artistMixerDraftCache && !fresh) return artistMixerDraftCache;
+  artistMixerStorageUnavailable = false;
+  try {
+    const stored = readJsonStorageEntry(artistMixerStorageKey);
+    if (stored.present) {
+      artistMixerDraftCache = normalizeArtistMixerDraft(stored.value);
+      artistMixerStorageMessage = '已从本机恢复随机画风工坊。';
+    } else {
+      artistMixerDraftCache = emptyArtistMixerDraft();
+      artistMixerStorageMessage = '画师池与成果会自动保存在本机。';
+    }
+  } catch (error) {
+    artistMixerDraftCache = emptyArtistMixerDraft();
+    if (error instanceof SyntaxError || error?.message?.includes('随机画风工坊')) {
+      artistMixerStorageMessage = '本机随机画风工坊数据损坏，已使用空工坊；原值未被覆盖。';
+    } else {
+      artistMixerStorageUnavailable = true;
+      artistMixerStorageMessage = '本机存储不可用；工坊仅在当前会话保留。';
+    }
+  }
+  return artistMixerDraftCache;
+}
+
+function persistArtistMixerDraft(draft = loadArtistMixerDraft()) {
+  const value = {
+    format: draft.format,
+    version: draft.version,
+    selectedModel: draft.selectedModel,
+    pools: Object.fromEntries(artistChainModels.map((model) => [model, draft.pools[model].map((pool) => ({
+      id: pool.id, name: pool.name,
+      artists: pool.artists.map(({ tag }) => ({ tag })),
+    }))])),
+    activePoolIds: { ...draft.activePoolIds },
+    settings: Object.fromEntries(artistChainModels.map((model) => [model, {
+      ...draft.settings[model],
+      slotArtists: [...draft.settings[model].slotArtists],
+    }])),
+    results: Object.fromEntries(artistChainModels.map((model) => [model, draft.results[model].map((result) => ({
+      id: result.id,
+      model: result.model,
+      note: result.note,
+      artistPrefix: result.artistPrefix,
+      syntax: result.syntax,
+      approximate: result.approximate,
+      createdAt: result.createdAt,
+      items: result.items.map(({ tag, weight }) => ({ tag, weight })),
+    }))])),
+    nextPoolId: draft.nextPoolId,
+    nextResultId: draft.nextResultId,
+  };
+  if (writeJsonStorage(artistMixerStorageKey, value)) {
+    artistMixerStorageUnavailable = false;
+    artistMixerStorageMessage = '画师池、设置与成果已保存到本机。';
+    return { ok: true, error: '' };
+  }
+  artistMixerStorageUnavailable = true;
+  artistMixerStorageMessage = '本机存储配额不足或写入失败；当前会话仍可继续使用。';
+  return { ok: false, error: artistMixerStorageMessage };
+}
+
+function artistMixerPool(draft, model, poolId = draft.activePoolIds[model]) {
+  return draft.pools[model].find((pool) => pool.id === poolId) || draft.pools[model][0];
+}
+
+function uniqueArtistMixerPool(pool) {
+  const result = new Map();
+  for (const artist of pool.artists) if (!result.has(artist.key)) result.set(artist.key, artist);
+  return [...result.values()];
+}
+
+function artistMixerFixedArtists(settings) {
+  const fixed = [];
+  const keys = new Set();
+  for (let index = 0; index < settings.perChain; index++) {
+    const value = settings.slotArtists[index]?.trim();
+    if (!value) continue;
+    const parsed = parseArtistMixerFixedValue(value);
+    if (parsed.error) return { error: `第 ${index + 1} 槽：${parsed.error}` };
+    if (keys.has(parsed.key)) return { error: `固定画师「${parsed.tag}」重复；同串画师不能重复。` };
+    keys.add(parsed.key);
+    fixed.push({ ...parsed, slot: index, hasWeight: parsed.numericWeight !== null || parsed.approximate });
+  }
+  if (fixed.length > settings.perChain) {
+    return { error: `固定画师数量不能超过每串 ${settings.perChain} 位。` };
+  }
+  return { fixed };
+}
+
+function randomArtistMixerWeight(settings) {
+  if (settings.weightMode === 'fixed') return settings.fixedWeight;
+  const step = Math.round(settings.step * 100);
+  const min = Math.round(settings.minWeight * 100);
+  const max = Math.round(settings.maxWeight * 100);
+  const ticks = Math.floor((max - min) / step);
+  return (min + Math.floor(Math.random() * (ticks + 1)) * step) / 100;
+}
+
+function sampleArtistMixerArtists(artists, count) {
+  const copy = [...artists];
+  const size = Math.min(count, copy.length);
+  for (let index = 0; index < size; index++) {
+    const other = index + Math.floor(Math.random() * (copy.length - index));
+    [copy[index], copy[other]] = [copy[other], copy[index]];
+  }
+  return copy.slice(0, size);
+}
+
+function shuffleArtistMixerArtists(artists) {
+  for (let index = artists.length - 1; index > 0; index--) {
+    const other = Math.floor(Math.random() * (index + 1));
+    [artists[index], artists[other]] = [artists[other], artists[index]];
+  }
+  return artists;
+}
+
+function artistMixerPrompt(items, artistPrefix = true, syntax = 'numeric') {
+  return items.map((item) => {
+    const name = `${artistPrefix ? 'artist:' : ''}${artistChainEscapeCommas(item.tag)}`;
+    if (item.weight === 1) return name;
+    if (syntax === 'brace' && item.weight > 0) {
+      const layers = Math.round(Math.log(item.weight) / Math.log(1.05));
+      const [left, right] = layers < 0 ? ['[', ']'] : ['{', '}'];
+      return left.repeat(Math.abs(layers)) + name + right.repeat(Math.abs(layers));
+    }
+    return `${artistChainWeightLabel(item.weight)}::${name} ::`;
+  }).join(', ');
+}
+
+function buildArtistMixerChain(pool, settings) {
+  if (!Number.isSafeInteger(settings?.perChain) || settings.perChain < 1 || settings.perChain > 10) {
+    return { error: '每串画师数需为 1–10 的整数。' };
+  }
+  const fixedResult = artistMixerFixedArtists(settings);
+  if (fixedResult.error) return fixedResult;
+  const fixed = fixedResult.fixed;
+  const allPoolArtists = uniqueArtistMixerPool(pool);
+  const randomCount = settings.perChain - fixed.length;
+  if (randomCount > 0 && !allPoolArtists.length) {
+    return { emptyPool: true, error: '当前画师池为空，请先导入或添加画师。' };
+  }
+  const fixedKeys = new Set(fixed.map((artist) => artist.key));
+  const available = allPoolArtists.filter((artist) => !fixedKeys.has(artist.key));
+  const availableUnique = fixed.length + available.length;
+  if (available.length < randomCount) {
+    return {
+      insufficient: true,
+      required: settings.perChain,
+      available: availableUnique,
+      error: `每串需要 ${settings.perChain} 位不重复画师（固定 ${fixed.length} 位，随机 ${randomCount} 位），`
+        + `当前池只有 ${availableUnique} 位可用；请至少再添加 ${settings.perChain - availableUnique} 位。`,
+    };
+  }
+  for (let index = 0; index < settings.perChain; index++) {
+    const slot = settings.slotWeights[index];
+    if (slot.weightMode === 'range' && slot.minWeight > slot.maxWeight) {
+      return { error: `第 ${index + 1} 槽的最小倍率大于最大倍率。` };
+    }
+  }
+  const sampled = sampleArtistMixerArtists(available, randomCount);
+  let orderedRandom = sampled;
+  if (settings.sortMode === 'fixed') {
+    const selected = new Set(sampled.map((artist) => artist.key));
+    orderedRandom = available.filter((artist) => selected.has(artist.key));
+  } else if (settings.sortMode === 'unlocked') {
+    orderedRandom = shuffleArtistMixerArtists([...sampled]);
+  }
+  const slots = [];
+  if (settings.sortMode === 'all') {
+    slots.push(...shuffleArtistMixerArtists([
+      ...fixed.map((artist) => ({ ...artist, fixedWeight: artist.hasWeight ? artist.weight : null })),
+      ...sampled.map((artist) => ({ ...artist, fixedWeight: null })),
+    ]));
+  } else {
+    const fixedBySlot = new Map(fixed.map((artist) => [artist.slot, artist]));
+    let randomIndex = 0;
+    for (let index = 0; index < settings.perChain; index++) {
+      const artist = fixedBySlot.get(index);
+      slots[index] = artist
+        ? { ...artist, fixedWeight: artist.hasWeight ? artist.weight : null }
+        : { ...orderedRandom[randomIndex++], fixedWeight: null };
+    }
+  }
+  const keys = new Set();
+  const items = slots.map((artist, index) => {
+    if (keys.has(artist.key)) throw new Error(`内部抽样出现重复画师：${artist.tag}`);
+    keys.add(artist.key);
+    return {
+      tag: artist.tag,
+      key: artist.key,
+      weight: artist.fixedWeight === null
+        ? randomArtistMixerWeight({ ...settings.slotWeights[artist.slot ?? index], step: settings.step })
+        : artist.fixedWeight,
+    };
+  });
+  return {
+    items,
+    text: artistMixerPrompt(items, settings.artistPrefix, settings.syntax),
+    artistPrefix: settings.artistPrefix,
+    syntax: settings.syntax,
+    approximate: slots.some((artist) => artist.approximate)
+      || (settings.syntax === 'brace' && items.some(({ weight }) => weight > 0 && weight !== 1)),
+  };
+}
+
+function generateArtistMixerChains(draft, model, poolId, {
+  count = draft.settings[model].batchCount,
+  exclude = new Set(),
+} = {}) {
+  if (!artistChainModels.includes(model)) return { chains: [], error: '请选择 V5 或 V4.5。' };
+  const pool = artistMixerPool(draft, model, poolId);
+  const settings = draft.settings[model];
+  const wanted = mixerInteger(count, 1, 10, settings.batchCount);
+  const chains = [];
+  const seen = new Set(exclude);
+  const attempts = Math.max(80, wanted * 40);
+  for (let attempt = 0; attempt < attempts && chains.length < wanted; attempt++) {
+    const chain = buildArtistMixerChain(pool, settings);
+    if (chain.error) return { chains, ...chain };
+    if (seen.has(chain.text)) continue;
+    seen.add(chain.text);
+    chains.push(chain);
+  }
+  if (!chains.length) {
+    return {
+      chains,
+      duplicateExhausted: true,
+      error: '当前池没有新的不重复组合；以前的成果仍完整保留。',
+    };
+  }
+  return {
+    chains,
+    partial: chains.length < wanted,
+    note: chains.length < wanted ? `可用且未重复的组合只有 ${chains.length} 组，没有用重复项补足。` : '',
+  };
+}
+
+function addArtistMixerResultToWorkbench(model, items) {
+  if (!artistChainModels.includes(model)) return { error: '成果模型不正确。' };
+  const draft = loadArtistChainDraft();
+  draft.selectedModel = model;
+  let added = 0;
+  let duplicates = 0;
+  let capacity = 0;
+  let invalid = 0;
+  for (const item of items) {
+    const result = enqueueArtistChainTag(draft, model, item.tag, { weight: item.weight });
+    if (result.added) added++;
+    else if (result.duplicate) duplicates++;
+    else if (result.capacity) capacity++;
+    else invalid++;
+  }
+  if (added) persistArtistChainDraft(draft);
+  refreshArtistChainShortcuts();
+  return { added, duplicates, capacity, invalid, model };
+}
+
+function addToMixerPool(values, { model = null } = {}) {
+  const draft = loadArtistMixerDraft();
+  const list = Array.isArray(values) ? values : [values];
+  const requestedModel = model === null || model === undefined || model === '' ? '' : mixerModel(model);
+  const failure = (error) => {
+    const reportedModel = requestedModel || draft.selectedModel;
+    const reportedPool = artistMixerPool(draft, reportedModel);
+    return {
+      added: 0, count: reportedPool.artists.length, pool: reportedPool.name,
+      model: reportedModel, storageError: '', error,
+    };
+  };
+  if (model !== null && model !== undefined && model !== '' && !requestedModel) {
+    return failure('目标模型必须是 V5 或 V4.5。');
+  }
+  if (!list.length || list.every((value) => value === undefined || value === null || value === '')) {
+    return failure('没有可加入画师池的内容。');
+  }
+  let targetModel = requestedModel;
+  const normalized = [];
+  for (const value of list) {
+    if (value === undefined || value === null || value === '') continue;
+    let tag = '';
+    let valueModel = '';
+    if (typeof value === 'string') {
+      tag = parseArtistMixerFixedValue(value).tag || '';
+    } else if (typeof value === 'object' && !Array.isArray(value)) {
+      if (value.section && value.section !== 'artist') {
+        return failure('只能把画师条目加入画师池，提示词整串不会自动拆入。');
+      }
+      valueModel = mixerModel(value.model);
+      tag = artistChainCardTag(value) || parseArtistMixerFixedValue(value.tag).tag || '';
+      if (!valueModel && !targetModel) {
+        return failure('画师卡片需要明确 V5 或 V4.5 模型，避免跨模型混入。');
+      }
+    }
+    const normalizedTag = parseArtistMixerFixedValue(tag);
+    if (!tag || normalizedTag.error) return failure(`无效画师标签：${normalizedTag.error || '未找到完整 tag'}`);
+    const chosenModel = valueModel || targetModel || draft.selectedModel;
+    if (targetModel && chosenModel !== targetModel) {
+      return failure(`不能把 ${chosenModel} 画师加入 ${targetModel} 画师池。`);
+    }
+    if (valueModel && requestedModel && valueModel !== requestedModel) {
+      return failure(`不能把 ${valueModel} 画师加入 ${requestedModel} 画师池。`);
+    }
+    targetModel = chosenModel;
+    normalized.push({ tag: normalizedTag.tag, key: normalizedTag.key });
+  }
+  if (!normalized.length) return failure('没有可加入画师池的内容。');
+  draft.selectedModel = targetModel;
+  const pool = artistMixerPool(draft, targetModel);
+  const keys = new Set(pool.artists.map((artist) => artist.key));
+  let added = 0;
+  let duplicates = 0;
+  let invalid = 0;
+  for (const artist of normalized) {
+    if (keys.has(artist.key)) {
+      duplicates++;
+      continue;
+    }
+    if (pool.artists.length >= artistMixerPoolCapacity) {
+      invalid++;
+      continue;
+    }
+    keys.add(artist.key);
+    pool.artists.push(artist);
+    added++;
+  }
+  const stored = persistArtistMixerDraft(draft);
+  return {
+    added,
+    duplicates,
+    invalid,
+    count: pool.artists.length,
+    pool: pool.name,
+    model: targetModel,
+    storageError: stored.error,
+    error: invalid ? `画师池最多 ${artistMixerPoolCapacity} 位，部分内容未加入。` : '',
+  };
+}
+
 function artistChainCardTag(card) {
   const explicit = extractPromptTags(card?.prompt).filter((item) => item.explicit);
   if (explicit.length === 1) {
@@ -1337,8 +1971,661 @@ function artistChainCardTag(card) {
   return fromTitle.error ? '' : fromTitle.tag;
 }
 
+function openArtistMixer({ back = null, model = null, pool = null } = {}) {
+  const draft = loadArtistMixerDraft();
+  const targetModel = mixerModel(model) || draft.selectedModel;
+  draft.selectedModel = targetModel;
+  if (typeof pool === 'string' && pool) {
+    const selected = draft.pools[targetModel].find((item) => item.id === pool || item.name === pool);
+    if (selected) draft.activePoolIds[targetModel] = selected.id;
+  }
+  if (!artistMixerSession) {
+    artistMixerSession = {
+      back,
+      generated: { V5: [], 'V4.5': [] },
+      poolSearch: { V5: '', 'V4.5': '' },
+      generatedPage: { V5: 0, 'V4.5': 0 },
+      resultPage: { V5: 0, 'V4.5': 0 },
+      status: '',
+    };
+  } else {
+    artistMixerSession.back = back;
+  }
+  artistMixerSession.draft = draft;
+  artistMixerSession.model = targetModel;
+  renderArtistMixerScreen();
+}
+
+function mixerSetStatus(session, message, error = false) {
+  session.status = message;
+  session.statusError = error;
+}
+
+function mixerPager(current, pages, move, label) {
+  const nav = node('nav', 'mixer-pager');
+  nav.setAttribute('aria-label', label);
+  const previous = button('上一页', 'soft compact', () => move(current - 1));
+  const next = button('下一页', 'soft compact', () => move(current + 1));
+  previous.disabled = current <= 0;
+  next.disabled = current >= pages - 1;
+  nav.append(previous, node('span', 'muted', `${current + 1} / ${Math.max(1, pages)} 页`), next);
+  return nav;
+}
+
+function mixerSaveResult(session, model, chain, noteValue) {
+  const draft = session.draft;
+  const note = normalizeArtistMixerNote(noteValue);
+  if (note === null) return { error: `备注最多 ${artistMixerNoteMaxLength} 个字符。` };
+  if (draft.results[model].length >= artistMixerResultCapacity) {
+    return { error: `每个模型最多保存 ${artistMixerResultCapacity} 条成果；请先删除旧成果。` };
+  }
+  draft.nextResultId = Math.max(1, Number(draft.nextResultId) || 1);
+  let id;
+  do {
+    id = `mixer-${model.replace('.', '_')}-${Date.now()}-${draft.nextResultId++}`;
+  } while (draft.results[model].some((result) => result.id === id));
+  const result = {
+    id,
+    model,
+    note,
+    items: chain.items.map(({ tag, key, weight }) => ({ tag, key, weight })),
+    artistPrefix: chain.artistPrefix ?? draft.settings[model].artistPrefix,
+    syntax: chain.syntax || 'numeric',
+    approximate: chain.approximate === true,
+    createdAt: Date.now(),
+  };
+  draft.results[model].unshift(result);
+  const stored = persistArtistMixerDraft(draft);
+  return { result, storageError: stored.error };
+}
+
+function mixerResultCard(session, model, result, saved = false, chain = null, noteInput = '') {
+  const item = chain || result;
+  const text = artistMixerPrompt(item.items, item.artistPrefix, item.syntax);
+  const card = node('article', saved ? 'mixer-result mixer-result-saved' : 'mixer-result mixer-result-generated');
+  const heading = node('div', 'mixer-result-heading');
+  heading.append(
+    node('h3', '', saved ? `已保存 · ${model}` : `未保存 ${model} · ${result.items.length} 位`),
+    node('span', 'muted', `${saved ? `${result.items.length} 位画师` : '本次新增'} · 总倍率 ${artistChainWeightLabel(item.items.reduce((sum, entry) => sum + Math.round(entry.weight * 100), 0) / 100)}${item.approximate ? ' · 含近似倍率' : ''}`),
+  );
+  const prompt = node('pre', 'prompt mixer-result-prompt', text);
+  prompt.tabIndex = 0;
+  const note = textInput('input', noteInput, '成果备注（可选）', artistMixerNoteMaxLength);
+  note.setAttribute('aria-label', saved ? '编辑成果备注' : '保存成果备注');
+  const actionsRow = node('div', 'mixer-result-actions');
+  actionsRow.append(button('复制', 'soft compact', () => copy(text)));
+  if (saved) {
+    actionsRow.append(button('改备注', 'soft compact', () => {
+      const normalized = normalizeArtistMixerNote(note.value);
+      if (normalized === null) {
+        mixerSetStatus(session, `备注最多 ${artistMixerNoteMaxLength} 个字符。`, true);
+        renderArtistMixerScreen();
+        return;
+      }
+      result.note = normalized;
+      const stored = persistArtistMixerDraft(session.draft);
+      mixerSetStatus(session, stored.error || '成果备注已更新。', !stored.ok);
+      renderArtistMixerScreen();
+    }));
+  } else {
+    actionsRow.append(button('保存成果', 'primary compact', () => {
+      const savedResult = mixerSaveResult(session, model, chain, note.value);
+      if (savedResult.error) {
+        mixerSetStatus(session, savedResult.error, true);
+        renderArtistMixerScreen();
+        return;
+      }
+      const index = session.generated[model].indexOf(chain);
+      if (index >= 0) session.generated[model].splice(index, 1);
+      mixerSetStatus(session, savedResult.storageError || '成果已保存，可继续修改备注或复制。', Boolean(savedResult.storageError));
+      renderArtistMixerScreen();
+    }));
+  }
+  actionsRow.append(button('加入画风串', 'soft compact', () => {
+    const addition = addArtistMixerResultToWorkbench(model, item.items);
+    const parts = [`已加入 ${addition.added || 0} 位`];
+    if (addition.duplicates) parts.push(`${addition.duplicates} 位已在草稿`);
+    if (addition.capacity) parts.push('画风串容量不足');
+    if (addition.invalid) parts.push(`${addition.invalid} 位无效`);
+    mixerSetStatus(session, `${parts.join('，')}；既有锁定与倍率保持不变。`, false);
+    toast(parts.join('，'));
+    renderArtistMixerScreen();
+  }));
+  if (saved) {
+    const remove = button('删除', 'text-button danger', () => {
+      if (!confirm('删除这条随机画风成果？画师池不会受影响。')) return;
+      session.draft.results[model] = session.draft.results[model].filter((entry) => entry.id !== result.id);
+      const stored = persistArtistMixerDraft(session.draft);
+      mixerSetStatus(session, stored.error || '成果已删除。', !stored.ok);
+      renderArtistMixerScreen();
+    });
+    remove.setAttribute('aria-label', '删除这条随机画风成果');
+    actionsRow.append(remove);
+  }
+  card.append(heading, prompt, note, actionsRow);
+  return card;
+}
+
+function showArtistMixerPromptImport(session) {
+  const { model } = session;
+  const returnToMixer = () => renderArtistMixerScreen();
+  openScreen('从提示词导入画师', returnToMixer);
+  const revision = screenRevision;
+  const input = textInput('textarea', '', '粘贴复制的正向提示词', 16000);
+  input.rows = 6;
+  const preview = node('div', 'mixer-import-preview');
+  const analyze = button('识别画师', 'primary', async () => {
+    const prompt = input.value.trim();
+    if (!prompt) { input.focus(); return; }
+    analyze.disabled = true;
+    preview.replaceChildren(node('p', 'muted', '正在识别…'));
+    try {
+      await loadSavedNaxDirectory(revision)?.catch(() => {});
+      const [korean, imported] = await Promise.all([
+        Promise.allSettled(koreanPacks.map(([id]) => loadKoreanCatalog(id))),
+        loadImportedArtistCatalogs(),
+      ]);
+      if (revision !== screenRevision) return;
+      if (input.value.trim() !== prompt) { preview.replaceChildren(); return; }
+      const { weights, skipped } = weightedPromptArtists(prompt,
+        promptArtistCatalog(korean, { importedResults: imported }), model, { allowExplicit: true });
+      const items = [...weights].map(([card, weight]) => ({ tag: artistChainCardTag(card), weight })).filter((item) => item.tag);
+      const omitted = skipped + weights.size - items.length;
+      preview.replaceChildren(node('p', 'muted',
+        `${model} · ${items.length} 位可导入${omitted ? ` · ${omitted} 位无法确认` : ''}`));
+      if (!items.length) return;
+      const controls = node('div', 'tool-actions');
+      controls.append(button('带原倍率加入工作台', 'primary', () => {
+        if (input.value.trim() !== prompt) return;
+        const result = addArtistMixerResultToWorkbench(model, items);
+        openArtistChainWorkbench({ back: returnToMixer, defaultModel: model });
+        toast(`已加入 ${result.added} 位 · 已有 ${result.duplicates} 位 · 跳过 ${result.invalid + result.capacity} 位`);
+      }), button('把标签加入当前池', 'soft', () => {
+        if (input.value.trim() !== prompt) return;
+        const result = addToMixerPool(items.map((item) => item.tag), { model });
+        mixerSetStatus(session, result.storageError || result.error
+          || `已向「${result.pool}」加入 ${result.added} 位画师。`, Boolean(result.error || result.storageError));
+        returnToMixer();
+      }));
+      preview.append(node('p', 'prompt', artistChainPrompt(items)), controls);
+    } catch {
+      if (revision === screenRevision) preview.replaceChildren(node('p', 'danger', '识别失败，请稍后重试。'));
+    } finally {
+      analyze.disabled = false;
+    }
+  });
+  input.addEventListener('input', () => preview.replaceChildren());
+  body.append(node('p', 'resource-note', '支持带 artist: 的标签和与词库完整匹配的标签。可读取常见的数字倍率。'),
+    field('正向提示词', input), analyze, preview);
+}
+
+function renderArtistMixerScreen() {
+  const session = artistMixerSession;
+  if (!session) return;
+  const draft = session.draft;
+  const model = session.model;
+  const settings = draft.settings[model];
+  const pool = artistMixerPool(draft, model);
+  const savedScroll = screen.open && screen.classList.contains('artist-mixer-screen') ? body.scrollTop : 0;
+  openScreen('随机画风工坊', session.back);
+  screen.classList.add('artist-chain-screen', 'artist-mixer-screen');
+  document.querySelector('.screen-inner')?.classList.add('artist-chain-open');
+
+  const workshop = node('div', 'mixer-workshop');
+  const intro = node('p', 'resource-note mixer-intro',
+    '从明确的 V5 / V4.5 画师池生成不重复画风串。固定画师优先占槽，池不足时停止而不回退重复。');
+  const status = node('p', `mixer-status${session.statusError ? ' danger' : ''}`, session.status || '');
+  status.setAttribute('role', 'status');
+  status.hidden = !session.status;
+  const storage = node('p', `mixer-storage-note${artistMixerStorageUnavailable ? ' danger' : ''}`,
+    artistMixerStorageMessage || '画师池与成果会自动保存在本机。');
+  storage.setAttribute('role', 'status');
+  workshop.append(intro, status, storage);
+
+  const modelRow = node('div', 'mixer-model-row');
+  modelRow.setAttribute('role', 'group');
+  modelRow.setAttribute('aria-label', '随机画风工坊模型');
+  for (const candidate of artistChainModels) {
+    modelRow.append(chip(candidate, candidate === model, () => {
+      if (candidate === model) return;
+      session.model = candidate;
+      draft.selectedModel = candidate;
+      mixerSetStatus(session, '');
+      persistArtistMixerDraft(draft);
+      renderArtistMixerScreen();
+    }));
+  }
+  modelRow.append(button('粘贴提示词', 'soft compact', () => showArtistMixerPromptImport(session)));
+  workshop.append(modelRow);
+
+  const poolSection = node('section', 'mixer-section mixer-pools');
+  const poolHeading = node('div', 'mixer-section-heading');
+  poolHeading.append(node('h2', '', '命名画师池'), node('span', 'muted', `${pool.artists.length} 位`));
+  const poolControls = node('div', 'mixer-pool-controls');
+  const poolSelect = node('select', 'mixer-pool-select');
+  poolSelect.setAttribute('aria-label', '当前画师池');
+  for (const item of draft.pools[model]) {
+    const option = node('option', '', `${item.name} · ${item.artists.length} 位`);
+    option.value = item.id;
+    poolSelect.append(option);
+  }
+  poolSelect.value = pool.id;
+  poolSelect.addEventListener('change', () => {
+    draft.activePoolIds[model] = poolSelect.value;
+    session.poolSearch[model] = '';
+    persistArtistMixerDraft(draft);
+    mixerSetStatus(session, '');
+    renderArtistMixerScreen();
+  });
+  const createPool = button('新建池', 'soft compact', () => {
+    if (draft.pools[model].length >= 40) {
+      mixerSetStatus(session, '每个模型最多保存 40 个命名画师池。', true);
+      renderArtistMixerScreen();
+      return;
+    }
+    const value = window.prompt('新画师池名称', `${model} 画师池 ${draft.pools[model].length + 1}`);
+    if (value === null) return;
+    const named = normalizeArtistMixerName(value);
+    if (named.error || draft.pools[model].some((item) =>
+      item.name.toLocaleLowerCase() === named.name.toLocaleLowerCase())) {
+      mixerSetStatus(session, named.error || '同模型已有同名画师池。', true);
+      renderArtistMixerScreen();
+      return;
+    }
+    let id;
+    do { id = `pool-${model.replace('.', '_')}-${draft.nextPoolId++}`; }
+    while (draft.pools[model].some((item) => item.id === id));
+    const newPool = { id, name: named.name, artists: [] };
+    draft.pools[model].push(newPool);
+    draft.activePoolIds[model] = newPool.id;
+    persistArtistMixerDraft(draft);
+    mixerSetStatus(session, `已新建「${newPool.name}」。`);
+    renderArtistMixerScreen();
+  });
+  const renamePool = button('重命名', 'soft compact', () => {
+    const value = window.prompt('画师池新名称', pool.name);
+    if (value === null) return;
+    const named = normalizeArtistMixerName(value);
+    if (named.error || draft.pools[model].some((item) =>
+      item.id !== pool.id && item.name.toLocaleLowerCase() === named.name.toLocaleLowerCase())) {
+      mixerSetStatus(session, named.error || '同模型已有同名画师池。', true);
+      renderArtistMixerScreen();
+      return;
+    }
+    pool.name = named.name;
+    persistArtistMixerDraft(draft);
+    mixerSetStatus(session, '画师池已重命名。');
+    renderArtistMixerScreen();
+  });
+  const deletePool = button('删除池', 'text-button danger', () => {
+    if (draft.pools[model].length < 2) {
+      mixerSetStatus(session, '每个模型至少保留一个画师池；可清空当前池。', true);
+      renderArtistMixerScreen();
+      return;
+    }
+    if (!confirm(`删除画师池「${pool.name}」？已保存成果不会删除。`)) return;
+    draft.pools[model] = draft.pools[model].filter((item) => item.id !== pool.id);
+    draft.activePoolIds[model] = draft.pools[model][0].id;
+    persistArtistMixerDraft(draft);
+    mixerSetStatus(session, '画师池已删除。');
+    renderArtistMixerScreen();
+  });
+  poolControls.append(poolSelect, createPool, renamePool, deletePool);
+  poolSection.append(poolHeading, poolControls);
+  workshop.append(poolSection);
+
+  const settingsSection = node('section', 'mixer-section mixer-settings');
+  settingsSection.append(node('h2', '', '抽样设置'));
+  const settingGrid = node('div', 'mixer-setting-grid');
+  const numberSetting = (label, value, min, max, step, change) => {
+    const input = node('input');
+    input.type = 'number';
+    input.inputMode = 'decimal';
+    input.min = String(min);
+    input.max = String(max);
+    input.step = String(step);
+    input.value = String(value);
+    input.setAttribute('aria-label', label);
+    input.addEventListener('change', () => change(input));
+    const wrapper = field(label, input);
+    settingGrid.append(wrapper);
+    return input;
+  };
+  numberSetting('每串画师数', settings.perChain, 1, 10, 1, (input) => {
+    const value = mixerInteger(input.value, 1, 10, 0);
+    if (!value) {
+      mixerSetStatus(session, '每串画师数需为 1–10 的整数。', true);
+    } else {
+      settings.perChain = value;
+      mixerSetStatus(session, '');
+      persistArtistMixerDraft(draft);
+    }
+    renderArtistMixerScreen();
+  });
+  numberSetting('批量组数', settings.batchCount, 1, 10, 1, (input) => {
+    const value = mixerInteger(input.value, 1, 10, 0);
+    if (!value) mixerSetStatus(session, '批量组数需为 1–10 的整数。', true);
+    else {
+      settings.batchCount = value;
+      mixerSetStatus(session, '');
+      persistArtistMixerDraft(draft);
+    }
+    renderArtistMixerScreen();
+  });
+  const stepSelect = options([[0.01, '步长 0.01'], [0.05, '步长 0.05'], [0.1, '步长 0.1']], String(settings.step));
+  stepSelect.setAttribute('aria-label', '随机倍率步长');
+  stepSelect.addEventListener('change', () => {
+    settings.step = Number(stepSelect.value);
+    persistArtistMixerDraft(draft);
+    renderArtistMixerScreen();
+  });
+  settingGrid.append(field('倍率步长', stepSelect));
+  const syntax = options([['numeric', '数值倍率 ::'], ['brace', '括号倍率（近似）']], settings.syntax);
+  syntax.addEventListener('change', () => {
+    settings.syntax = syntax.value;
+    persistArtistMixerDraft(draft);
+  });
+  settingGrid.append(field('输出语法', syntax));
+  const sortMode = options([
+    ['fixed', '固定槽序'],
+    ['unlocked', '随机未锁槽'],
+    ['all', '随机全部'],
+  ], settings.sortMode);
+  sortMode.setAttribute('aria-label', '画师排序方式');
+  sortMode.addEventListener('change', () => {
+    settings.sortMode = sortMode.value;
+    persistArtistMixerDraft(draft);
+    renderArtistMixerScreen();
+  });
+  settingGrid.append(field('排序', sortMode));
+  const prefixLabel = node('label', 'mixer-check-field');
+  const prefix = node('input');
+  prefix.type = 'checkbox';
+  prefix.checked = settings.artistPrefix;
+  prefix.addEventListener('change', () => {
+    settings.artistPrefix = prefix.checked;
+    persistArtistMixerDraft(draft);
+    renderArtistMixerScreen();
+  });
+  prefixLabel.append(prefix, node('span', '', '输出包含 artist: 前缀'));
+  settingGrid.append(prefixLabel);
+  settingsSection.append(
+    settingGrid,
+    node('p', 'mixer-setting-note muted',
+      '固定槽序保留固定画师槽位；随机未锁槽只打乱其空槽；随机全部会移动所有画师。'
+      + '固定画师可粘贴完整 tag，也接受 0.65::artist:name ::、{artist:name} 或 [artist:name]；'
+      + '括号模式每层按 1.05 近似；0 倍保留数值语法。'),
+  );
+
+  const slots = node('div', 'mixer-slot-list');
+  slots.setAttribute('aria-label', '固定画师槽位');
+  for (let index = 0; index < settings.perChain; index++) {
+    const slot = node('div', 'mixer-slot');
+    const weights = settings.slotWeights[index];
+    const input = textInput('input', settings.slotArtists[index], '留空则随机，或粘贴完整 artist tag', 512);
+    input.setAttribute('aria-label', `第 ${index + 1} 槽固定画师`);
+    input.autocomplete = 'off';
+    input.spellcheck = false;
+    const fromPool = options([['', '从当前池选择'], ...pool.artists.map((artist) => [artist.tag, artist.tag])], '');
+    fromPool.setAttribute('aria-label', `第 ${index + 1} 槽从池中选择固定画师`);
+    const hint = node('small', 'mixer-slot-hint muted');
+    const updateHint = () => {
+      const value = input.value.trim();
+      if (!value) hint.textContent = '本槽随机';
+      else {
+        const parsed = parseArtistMixerFixedValue(value);
+        hint.textContent = parsed.error ? parsed.error
+          : `固定 ${parsed.tag}${parsed.numericWeight !== null || parsed.approximate
+            ? ` · ${artistChainWeightLabel(parsed.weight)}×${parsed.approximate ? '（近似）' : ''}` : ''}`;
+      }
+      input.setAttribute('aria-invalid', String(Boolean(value) && Boolean(parseArtistMixerFixedValue(value).error)));
+    };
+    input.addEventListener('input', () => {
+      settings.slotArtists[index] = input.value;
+      updateHint();
+    });
+    input.addEventListener('change', () => {
+      settings.slotArtists[index] = input.value;
+      persistArtistMixerDraft(draft);
+    });
+    fromPool.addEventListener('change', () => {
+      if (!fromPool.value) return;
+      input.value = fromPool.value;
+      settings.slotArtists[index] = fromPool.value;
+      updateHint();
+      persistArtistMixerDraft(draft);
+    });
+    const clear = button('清除', 'text-button', () => {
+      input.value = '';
+      fromPool.value = '';
+      settings.slotArtists[index] = '';
+      updateHint();
+      persistArtistMixerDraft(draft);
+    });
+    const line = node('div', 'mixer-slot-controls');
+    line.append(node('strong', 'mixer-slot-number', `槽 ${index + 1}`), input, fromPool, clear);
+    const weightFields = node('div', 'mixer-slot-weights');
+    const mode = options([['range', '随机范围'], ['fixed', '固定倍率']], weights.weightMode);
+    mode.addEventListener('change', () => {
+      weights.weightMode = mode.value;
+      persistArtistMixerDraft(draft);
+      renderArtistMixerScreen();
+    });
+    weightFields.append(field(`槽 ${index + 1} 倍率模式`, mode));
+    const keys = weights.weightMode === 'range' ? [['minWeight', '最小'], ['maxWeight', '最大']] : [['fixedWeight', '固定倍率']];
+    for (const [key, label] of keys) {
+      const amount = node('input');
+      amount.type = 'number';
+      amount.inputMode = 'decimal';
+      amount.min = '0';
+      amount.max = '3';
+      amount.step = '0.01';
+      amount.value = artistChainWeightLabel(weights[key]);
+      amount.setAttribute('aria-label', `槽 ${index + 1} ${label}倍率`);
+      amount.addEventListener('change', () => {
+        const value = amount.value.trim();
+        if (!value || !isArtistChainWeight(Number(value))) {
+          amount.value = artistChainWeightLabel(weights[key]);
+          toast('倍率需在 0–3 内，最多两位小数。');
+          return;
+        }
+        weights[key] = Number(value);
+        persistArtistMixerDraft(draft);
+      });
+      weightFields.append(field(label, amount));
+    }
+    slot.append(line, hint, weightFields);
+    updateHint();
+    slots.append(slot);
+  }
+  settingsSection.append(slots);
+  workshop.append(settingsSection);
+
+  const library = node('section', 'mixer-section mixer-library');
+  const libraryHeading = node('div', 'mixer-section-heading');
+  libraryHeading.append(node('h2', '', '池内画师'), node('span', 'muted', `${pool.artists.length} 位`));
+  const searchForm = node('form', 'mixer-library-search');
+  const searchInput = textInput('search', session.poolSearch[model], '搜索当前池中的画师', 512);
+  searchInput.setAttribute('aria-label', '搜索当前画师池');
+  const searchButton = button('搜索', 'soft compact', () => {});
+  searchButton.type = 'submit';
+  searchForm.append(searchInput, searchButton);
+  searchForm.addEventListener('submit', (event) => {
+    event.preventDefault();
+    session.poolSearch[model] = searchInput.value.trim();
+    session.poolPage = 0;
+    renderArtistMixerScreen();
+  });
+  const importMine = button('导入我的词库', 'primary compact', () => {
+    const tags = state.personal.filter((card) => card.section === 'artist'
+      && (!mixerModel(card.model) || mixerModel(card.model) === model))
+      .map(artistChainCardTag).filter(Boolean);
+    if (!tags.length) {
+      mixerSetStatus(session, `「我的词库」中暂时没有可加入 ${model} 的画师。`, true);
+      renderArtistMixerScreen();
+      return;
+    }
+    const result = addToMixerPool(tags, { model });
+    mixerSetStatus(session,
+      result.storageError || result.error || `已向「${result.pool}」加入 ${result.added} 位画师。通用条目随当前模型归入 ${model}。`,
+      Boolean(result.error || result.storageError));
+    renderArtistMixerScreen();
+  });
+  const clearPool = button('清空当前池', 'text-button danger', () => {
+    if (!pool.artists.length) return;
+    if (!confirm(`清空「${pool.name}」中的 ${pool.artists.length} 位画师？已保存成果不会删除。`)) return;
+    pool.artists = [];
+    persistArtistMixerDraft(draft);
+    mixerSetStatus(session, '当前画师池已清空。');
+    renderArtistMixerScreen();
+  });
+  const libraryTools = node('div', 'mixer-library-tools');
+  libraryTools.append(importMine, clearPool);
+  library.append(libraryHeading, searchForm, libraryTools);
+  const term = artistTagKey(session.poolSearch[model]);
+  const matchingArtists = pool.artists.filter((artist) => !term || artist.key.includes(term));
+  const poolPages = Math.max(1, Math.ceil(matchingArtists.length / artistMixerPoolPageSize));
+  const poolPage = Math.min(session.poolPage || 0, poolPages - 1);
+  session.poolPage = poolPage;
+  const artistList = node('div', 'mixer-artist-list');
+  if (!matchingArtists.length) {
+    artistList.append(node('p', 'mixer-empty',
+      pool.artists.length ? '当前池没有匹配该搜索的画师。' : '当前池为空；可导入我的词库，或由画师页加入。'));
+  } else {
+    for (const artist of matchingArtists.slice(
+      poolPage * artistMixerPoolPageSize,
+      (poolPage + 1) * artistMixerPoolPageSize,
+    )) {
+      const row = node('div', 'mixer-artist-row');
+      const label = node('span', 'mixer-artist-tag', artist.tag);
+      const remove = button('删除', 'text-button danger', () => {
+        pool.artists = pool.artists.filter((entry) => entry.key !== artist.key);
+        persistArtistMixerDraft(draft);
+        mixerSetStatus(session, `已从「${pool.name}」删除 ${artist.tag}。`);
+        renderArtistMixerScreen();
+      });
+      remove.setAttribute('aria-label', `从画师池删除 ${artist.tag}`);
+      row.append(label, remove);
+      artistList.append(row);
+    }
+    if (poolPages > 1) {
+      artistList.append(mixerPager(poolPage, poolPages, (target) => {
+        if (target < 0 || target >= poolPages) return;
+        session.poolPage = target;
+        renderArtistMixerScreen();
+      }, '画师池分页'));
+    }
+  }
+  library.append(artistList);
+  workshop.append(library);
+
+  const drawSection = node('section', 'mixer-section mixer-draw');
+  const drawHeading = node('div', 'mixer-section-heading');
+  drawHeading.append(node('h2', '', '生成画风串'), node('span', 'muted', `${settings.batchCount} 组/批`));
+  const draw = button(`再抽取 ${settings.batchCount} 组`, 'primary mixer-draw-button', () => {
+    const fixed = artistMixerFixedArtists(settings);
+    if (fixed.error) {
+      mixerSetStatus(session, fixed.error, true);
+      renderArtistMixerScreen();
+      return;
+    }
+    const generated = session.generated[model];
+    const exclude = new Set([
+      ...generated.map((chain) => chain.text),
+      ...draft.results[model].map((result) => artistMixerPrompt(result.items, result.artistPrefix, result.syntax)),
+    ]);
+    const result = generateArtistMixerChains(draft, model, pool.id, {
+      count: settings.batchCount,
+      exclude,
+    });
+    if (!result.chains.length) {
+      mixerSetStatus(session, result.error, true);
+      renderArtistMixerScreen();
+      return;
+    }
+    generated.unshift(...result.chains);
+    session.generatedPage[model] = 0;
+    mixerSetStatus(session,
+      `新增 ${result.chains.length} 组；旧成果未清除。${result.note || ''}`,
+      Boolean(result.error));
+    renderArtistMixerScreen();
+  });
+  const generatedCount = session.generated[model].length;
+  const clearGenerated = button('清空未保存', 'text-button danger', () => {
+    if (!session.generated[model].length) return;
+    if (!confirm('清空本次尚未保存的生成结果？已保存成果不受影响。')) return;
+    session.generated[model] = [];
+    session.generatedPage[model] = 0;
+    mixerSetStatus(session, '未保存结果已清空；已保存成果仍在下方。');
+    renderArtistMixerScreen();
+  });
+  clearGenerated.disabled = generatedCount === 0;
+  const drawTools = node('div', 'mixer-draw-tools');
+  drawTools.append(draw, node('span', 'muted', `未保存 ${generatedCount} 组`), clearGenerated);
+  drawSection.append(drawHeading, drawTools);
+  const generatedGrid = node('div', 'mixer-result-list');
+  if (!generatedCount) {
+    generatedGrid.append(node('p', 'mixer-empty', '尚未抽取。设置画师池和固定槽后开始生成。'));
+  } else {
+    const generatedPages = Math.max(1, Math.ceil(generatedCount / artistMixerResultPageSize));
+    const generatedPage = Math.min(session.generatedPage[model] || 0, generatedPages - 1);
+    session.generatedPage[model] = generatedPage;
+    const start = generatedPage * artistMixerResultPageSize;
+    for (const chain of session.generated[model].slice(start, start + artistMixerResultPageSize)) {
+      generatedGrid.append(mixerResultCard(session, model, chain, false, chain));
+    }
+    if (generatedPages > 1) {
+      generatedGrid.append(mixerPager(generatedPage, generatedPages, (target) => {
+        if (target < 0 || target >= generatedPages) return;
+        session.generatedPage[model] = target;
+        renderArtistMixerScreen();
+      }, '未保存成果分页'));
+    }
+  }
+  drawSection.append(generatedGrid);
+  workshop.append(drawSection);
+
+  const savedSection = node('section', 'mixer-section mixer-saved');
+  const savedHeading = node('div', 'mixer-section-heading');
+  savedHeading.append(node('h2', '', '已保存成果'), node('span', 'muted', `${draft.results[model].length} 条`));
+  const savedList = node('div', 'mixer-result-list');
+  if (!draft.results[model].length) {
+    savedList.append(node('p', 'mixer-empty', '保存后的成果会保存在这里，可复制、改备注或删除。'));
+  } else {
+    const resultPages = Math.max(1, Math.ceil(draft.results[model].length / artistMixerResultPageSize));
+    const resultPage = Math.min(session.resultPage[model] || 0, resultPages - 1);
+    session.resultPage[model] = resultPage;
+    const start = resultPage * artistMixerResultPageSize;
+    for (const result of draft.results[model].slice(start, start + artistMixerResultPageSize)) {
+      savedList.append(mixerResultCard(session, model, result, true, null, result.note));
+    }
+    if (resultPages > 1) {
+      savedList.append(mixerPager(resultPage, resultPages, (target) => {
+        if (target < 0 || target >= resultPages) return;
+        session.resultPage[model] = target;
+        renderArtistMixerScreen();
+      }, '已保存成果分页'));
+    }
+  }
+  savedSection.append(savedHeading, savedList);
+  workshop.append(savedSection);
+  body.append(workshop);
+  actions.append(
+    button('打开画风串工作台', 'soft', () => openArtistChainWorkbench({
+      back: session.back,
+      defaultModel: model,
+    })),
+    button('返回', 'primary', () => {
+      if (session.back) session.back();
+      else closeScreen();
+    }),
+  );
+  body.scrollTop = savedScroll;
+}
+
 window.PocketApp = window.PocketApp || {};
 window.PocketApp.chain = Object.freeze({
   openArtistDrawScreen, openArtistChainWorkbench, currentArtistChain,
   copyCurrentArtistChain, refreshArtistChainShortcuts,
+  openMixer: openArtistMixer, addToMixerPool, mixerModel: () => loadArtistMixerDraft().selectedModel,
 });

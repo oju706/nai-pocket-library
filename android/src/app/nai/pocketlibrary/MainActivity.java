@@ -522,6 +522,7 @@ public final class MainActivity extends Activity {
                     Uri uri = Uri.parse(value);
                     if (!"https".equals(uri.getScheme()) || !Arrays.asList("arca.live", "nax.moe", "gall.dcinside.com",
                             "docs.novelai.net", "creativecommons.org", "huggingface.co",
+                            "novelai.quicktagcloud.com",
                             "danbooru.donmai.us", "gelbooru.com", "github.com").contains(uri.getHost())) {
                         send(id, null, "无法打开这个来源。");
                         return;

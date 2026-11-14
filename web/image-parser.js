@@ -1,14 +1,770 @@
 'use strict';
 
 // NovelAI image metadata, prompt parsing, artist matching, and reference-tag UI.
+let webImagePromptSequence = 0;
+
 async function readImagePrompts() {
-  if (!window.Pocket) { toast('请在安卓 App 中选择原图。'); return; }
   const revision = screenRevision;
+  const sequence = ++webImagePromptSequence;
+  if (!window.Pocket) {
+    try {
+      const file = await chooseWebPromptImage();
+      if (!file || sequence !== webImagePromptSequence || revision !== screenRevision) return;
+      const data = await readLocalNovelAiImage(file);
+      if (sequence !== webImagePromptSequence || revision !== screenRevision) return;
+      showPromptImport(data);
+    } catch (error) {
+      if (sequence === webImagePromptSequence && revision === screenRevision) {
+        toast(error?.message || '读取原图失败。');
+      }
+    }
+    return;
+  }
   try {
     const data = await native('readImagePrompts');
     if (!data || revision !== screenRevision) return;
     showPromptImport(data);
   } catch (error) { toast(error.message || '读取原图失败。'); }
+}
+
+function chooseWebPromptImage() {
+  const input = byId('web-image-prompt');
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (file) => {
+      if (settled) return;
+      settled = true;
+      input.removeEventListener('change', changed);
+      input.removeEventListener('cancel', cancelled);
+      input.value = '';
+      resolve(file);
+    };
+    const changed = () => finish(input.files?.[0] || null);
+    const cancelled = () => finish(null);
+    input.addEventListener('change', changed);
+    input.addEventListener('cancel', cancelled);
+    input.value = '';
+    try {
+      input.click();
+    } catch (error) {
+      input.removeEventListener('change', changed);
+      input.removeEventListener('cancel', cancelled);
+      reject(error);
+    }
+  });
+}
+
+const webPromptLimits = Object.freeze({
+  fileBytes: 32 * 1024 * 1024,
+  pixels: 8_000_000,
+  metadataBytes: 2 * 1024 * 1024,
+  textFields: 128,
+});
+const pngSignature = Object.freeze([137, 80, 78, 71, 13, 10, 26, 10]);
+const promptParameterWrappers = new Set([
+  'comment', 'generation', 'request', 'settings', 'parameters',
+  'generationparams', 'generationparameters', 'generationsettings',
+]);
+const promptDirectParameters = new Set([
+  'prompt', 'uc', 'negative_prompt', 'model', 'Source', 'v4_prompt', 'v4_negative_prompt',
+  'actual_prompts', 'sampler', 'steps', 'seed', 'width', 'height', 'scale', 'cfg_rescale',
+  'noise_schedule', 'strength', 'noise', 'uncond_scale', 'sm', 'sm_dyn', 'qualityToggle',
+  'dynamic_thresholding', 'ucPreset', 'n_samples', 'denoise_strength',
+]);
+let utf8TextEncoder;
+let utf8TextDecoder;
+let latin1TextDecoder;
+
+function utf8ByteLength(value) {
+  return utf8TextEncoder.encode(String(value)).length;
+}
+
+function addPromptField(fields, key, value) {
+  if (!key || value == null) return;
+  if (!(fields instanceof Map)) throw new TypeError('字段集合无效。');
+  let unique = key;
+  let suffix = 2;
+  while (fields.has(unique)) {
+    if (String(fields.get(unique)) === String(value)) return;
+    unique = `${key}.${suffix++}`;
+  }
+  if (fields.size >= webPromptLimits.textFields) throw new Error('图片文本字段过多。');
+  fields.set(unique, String(value));
+}
+
+function promptFieldEntries(fields) {
+  if (fields instanceof Map) return [...fields.entries()];
+  return Object.entries(fields || {});
+}
+
+function promptFieldMap(fields) {
+  return fields instanceof Map ? new Map(fields) : new Map(Object.entries(fields || {}));
+}
+
+function readPromptU32(data, offset) {
+  return data.getUint32(offset, false);
+}
+
+function readPromptU16(data, offset, littleEndian = false) {
+  return data.getUint16(offset, littleEndian);
+}
+
+function readPromptU24LittleEndian(bytes, offset) {
+  return bytes[offset] | bytes[offset + 1] << 8 | bytes[offset + 2] << 16;
+}
+
+function promptAscii(bytes, start, end) {
+  let value = '';
+  for (let index = start; index < end; index++) value += String.fromCharCode(bytes[index]);
+  return value;
+}
+
+function promptZero(bytes, start, end = bytes.length) {
+  for (let index = start; index < end; index++) if (bytes[index] === 0) return index;
+  return -1;
+}
+
+function promptTextBytes(value) {
+  const length = utf8ByteLength(value);
+  if (length > webPromptLimits.metadataBytes) throw new Error('图片中的单个文本字段超过 2 MB。');
+  return length;
+}
+
+async function promptDecompress(bytes, format, label) {
+  if (typeof DecompressionStream !== 'function') {
+    throw new Error(`${label}需要当前 Windows App 支持本地解压。`);
+  }
+  let reader;
+  try {
+    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream(format));
+    reader = stream.getReader();
+    const chunks = [];
+    let length = 0;
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      length += value.byteLength;
+      if (length > webPromptLimits.metadataBytes) {
+        throw new Error(`${label}解压后超过 2 MB。`);
+      }
+      chunks.push(value);
+    }
+    const output = new Uint8Array(length);
+    let offset = 0;
+    for (const chunk of chunks) {
+      output.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return output;
+  } catch (error) {
+    if (String(error?.message || '').includes('超过 2 MB')) throw error;
+    throw new Error(`${label}损坏或无法解压。`);
+  } finally {
+    try { reader?.releaseLock(); } catch { /* The stream is already closed. */ }
+  }
+}
+
+async function decodePngTextChunk(type, bytes, metadataState) {
+  const end = promptZero(bytes, 0);
+  if (end < 1 || end > 79) throw new Error('PNG 文本字段名称异常。');
+  const key = latin1TextDecoder.decode(bytes.subarray(0, end));
+  let start = end + 1;
+  let compressed = false;
+  let unicode = false;
+  if (type === 'zTXt') {
+    if (start >= bytes.length || bytes[start++] !== 0) throw new Error('无法识别 PNG 文本的压缩方式。');
+    compressed = true;
+  } else if (type === 'iTXt') {
+    if (start + 2 > bytes.length) throw new Error('PNG 国际文本字段不完整。');
+    const flag = bytes[start++];
+    const method = bytes[start++];
+    if ((flag !== 0 && flag !== 1) || method !== 0) throw new Error('无法识别 PNG 文本的压缩方式。');
+    compressed = flag === 1;
+    unicode = true;
+    const languageEnd = promptZero(bytes, start);
+    if (languageEnd < 0) throw new Error('PNG 国际文本字段不完整。');
+    const translatedEnd = promptZero(bytes, languageEnd + 1);
+    if (translatedEnd < 0) throw new Error('PNG 国际文本字段不完整。');
+    start = translatedEnd + 1;
+  }
+  let text = bytes.subarray(start);
+  if (compressed) text = await promptDecompress(text, 'deflate', `PNG ${type} 文本`);
+  if (text.byteLength > webPromptLimits.metadataBytes) throw new Error('图片文本解压后超过 2 MB。');
+  let value;
+  try {
+    value = unicode ? utf8TextDecoder.decode(text) : latin1TextDecoder.decode(text);
+  } catch {
+    throw new Error('PNG 国际文本不是有效的 UTF-8 内容。');
+  }
+  metadataState.decompressedBytes += text.byteLength;
+  if (metadataState.decompressedBytes > webPromptLimits.metadataBytes) {
+    throw new Error('图片文本解压后合计超过 2 MB。');
+  }
+  promptTextBytes(value);
+  addPromptField(metadataState.fields, key, value);
+}
+
+async function parsePngMetadata(buffer) {
+  const bytes = new Uint8Array(buffer);
+  if (bytes.length < 33 || pngSignature.some((value, index) => bytes[index] !== value)) {
+    throw new Error('文件不是有效的 PNG 原图。');
+  }
+  const data = new DataView(buffer);
+  const fields = new Map();
+  const metadataState = { fields, decompressedBytes: 0 };
+  let metadataBytes = 0;
+  let width = 0;
+  let height = 0;
+  let colorType = -1;
+  let sawHeader = false;
+  for (let offset = 8, chunkCount = 0; offset + 12 <= bytes.length; chunkCount++) {
+    if (chunkCount >= 10000) throw new Error('PNG 数据块过多。');
+    const length = readPromptU32(data, offset);
+    if (length > buffer.byteLength - offset - 12) throw new Error('PNG 数据块长度异常，原图可能不完整。');
+    const type = promptAscii(bytes, offset + 4, offset + 8);
+    const payloadStart = offset + 8;
+    if (!sawHeader && type !== 'IHDR') throw new Error('PNG 缺少有效的图片头。');
+    if (type === 'IHDR') {
+      if (sawHeader || length !== 13) throw new Error('PNG 图片头异常。');
+      sawHeader = true;
+      width = readPromptU32(data, payloadStart);
+      height = readPromptU32(data, payloadStart + 4);
+      colorType = bytes[payloadStart + 9];
+      if (!width || !height || width * height > webPromptLimits.pixels) {
+        throw new Error('原图最多支持 800 万像素。');
+      }
+    } else if (type === 'tEXt' || type === 'zTXt' || type === 'iTXt') {
+      metadataBytes += length;
+      if (metadataBytes > webPromptLimits.metadataBytes) throw new Error('原图中的文本信息超过 2 MB。');
+      await decodePngTextChunk(type, bytes.subarray(payloadStart, payloadStart + length), metadataState);
+    } else if (type === 'IEND') {
+      if (length !== 0) throw new Error('PNG 结束标记异常。');
+      return { kind: 'png', width, height, colorType, fields };
+    }
+    offset = payloadStart + length + 4;
+  }
+  throw new Error('PNG 文件不完整。');
+}
+
+function parseWebpMetadata(buffer) {
+  const bytes = new Uint8Array(buffer);
+  if (bytes.length < 12 || promptAscii(bytes, 0, 4) !== 'RIFF' || promptAscii(bytes, 8, 12) !== 'WEBP') {
+    throw new Error('文件不是有效的 WebP 原图。');
+  }
+  const data = new DataView(buffer);
+  const riffEnd = data.getUint32(4, true) + 8;
+  if (riffEnd < 12 || riffEnd > bytes.length) throw new Error('WebP 文件不完整。');
+  let width = 0;
+  let height = 0;
+  let hasAlpha = false;
+  let hasExif = false;
+  for (let offset = 12, chunkCount = 0; offset + 8 <= riffEnd; chunkCount++) {
+    if (chunkCount >= 10000) throw new Error('WebP 数据块过多。');
+    const type = promptAscii(bytes, offset, offset + 4);
+    const length = data.getUint32(offset + 4, true);
+    const start = offset + 8;
+    if (length > riffEnd - start) throw new Error('WebP 数据块长度异常。');
+    if (type === 'VP8X' && length >= 10) {
+      hasAlpha = Boolean(bytes[start] & 0x10);
+      width = readPromptU24LittleEndian(bytes, start + 4) + 1;
+      height = readPromptU24LittleEndian(bytes, start + 7) + 1;
+    } else if (type === 'VP8L' && length >= 5 && bytes[start] === 0x2f) {
+      const dimensions = data.getUint32(start + 1, true);
+      width = (dimensions & 0x3fff) + 1;
+      height = ((dimensions >>> 14) & 0x3fff) + 1;
+      hasAlpha = hasAlpha || Boolean(dimensions & 0x10000000);
+    } else if (type === 'VP8 ' && length >= 10
+      && bytes[start + 3] === 0x9d && bytes[start + 4] === 0x01 && bytes[start + 5] === 0x2a) {
+      width ||= readPromptU16(data, start + 6, true) & 0x3fff;
+      height ||= readPromptU16(data, start + 8, true) & 0x3fff;
+    } else if (type === 'EXIF') {
+      hasExif = true;
+    }
+    offset = start + length + (length & 1);
+  }
+  if (!width || !height) throw new Error('WebP 缺少可识别的图片尺寸。');
+  if (width * height > webPromptLimits.pixels) throw new Error('原图最多支持 800 万像素。');
+  return { kind: 'webp', width, height, hasAlpha, hasExif, fields: new Map() };
+}
+
+function safePromptJsonDepth(value) {
+  let depth = 0;
+  let quoted = false;
+  let escaped = false;
+  for (const character of String(value)) {
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (character === '\\') escaped = true;
+      else if (character === '"') quoted = false;
+    } else if (character === '"') quoted = true;
+    else if (character === '{' || character === '[') {
+      if (++depth > 64) return false;
+    } else if (character === '}' || character === ']') depth--;
+  }
+  return true;
+}
+
+function looksLikePromptJsonObject(value) {
+  return typeof value === 'string' && /^\s*\{/.test(value);
+}
+
+function promptJsonObject(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+  if (!looksLikePromptJsonObject(value) || !safePromptJsonDepth(value)) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function compactPromptKey(key) {
+  return String(key).toLowerCase().replace(/[_\-\s]/g, '');
+}
+
+function normalizePromptParameterName(key) {
+  switch (compactPromptKey(key)) {
+    case 'sampler': case 'samplername': case 'samplingmethod': return 'sampler';
+    case 'steps': case 'nsteps': case 'stepcount': case 'numinferencesteps': case 'samplingsteps': return 'steps';
+    case 'seed': case 'randomseed': return 'seed';
+    case 'scale': case 'cfgscale': case 'guidancescale': return 'scale';
+    case 'cfgrescale': return 'cfg_rescale';
+    case 'noiseschedule': return 'noise_schedule';
+    case 'negativeprompt': return 'negative_prompt';
+    case 'v4prompt': return 'v4_prompt';
+    case 'v4negativeprompt': return 'v4_negative_prompt';
+    case 'actualprompts': return 'actual_prompts';
+    case 'qualitytoggle': return 'qualityToggle';
+    case 'ucpreset': return 'ucPreset';
+    case 'dynamicthresholding': return 'dynamic_thresholding';
+    case 'uncondscale': return 'uncond_scale';
+    case 'nsamples': return 'n_samples';
+    case 'denoisestrength': return 'denoise_strength';
+    case 'smdyn': return 'sm_dyn';
+    case 'source': return 'Source';
+    case 'prompt': case 'uc': case 'model': case 'width': case 'height': case 'noise':
+    case 'strength': case 'sm': return compactPromptKey(key);
+    default: return String(key);
+  }
+}
+
+function setPromptObjectValue(target, key, value) {
+  Object.defineProperty(target, key, {
+    value, enumerable: true, configurable: true, writable: true,
+  });
+}
+
+function deepMergePromptObject(target, source) {
+  for (const [key, incoming] of Object.entries(source || {})) {
+    if (incoming == null) continue;
+    const current = target[key];
+    if (current && typeof current === 'object' && !Array.isArray(current)
+      && incoming && typeof incoming === 'object' && !Array.isArray(incoming)) {
+      deepMergePromptObject(current, incoming);
+    } else if (Array.isArray(current) && Array.isArray(incoming) && incoming.length < current.length) {
+      continue;
+    } else if (typeof current === 'string' && current && typeof incoming === 'string' && !incoming) {
+      continue;
+    } else {
+      setPromptObjectValue(target, key, incoming);
+    }
+  }
+  return target;
+}
+
+function flattenPromptParameters(source, depth = 0) {
+  const result = {};
+  const flattened = new Set();
+  let comment = null;
+  for (const [key, value] of Object.entries(source || {})) {
+    const compact = compactPromptKey(key);
+    if (depth >= 32 || !promptParameterWrappers.has(compact)) continue;
+    const nested = promptJsonObject(value);
+    if (!nested) continue;
+    flattened.add(key);
+    const fields = flattenPromptParameters(nested, depth + 1);
+    if (compact === 'comment') comment = fields;
+    else deepMergePromptObject(result, fields);
+  }
+  for (const [key, value] of Object.entries(source || {})) {
+    if (flattened.has(key)) continue;
+    const name = normalizePromptParameterName(key);
+    if (key !== name && Object.prototype.hasOwnProperty.call(source, name)) continue;
+    setPromptObjectValue(result, name, value);
+  }
+  if (comment) deepMergePromptObject(result, comment);
+  return result;
+}
+
+function promptObjectValue(object, key) {
+  return promptJsonObject(object?.[key]);
+}
+
+function promptString(object, key) {
+  return typeof object?.[key] === 'string' ? object[key] : '';
+}
+
+function promptV4CaptionText(v4) {
+  const caption = v4?.caption;
+  if (typeof caption === 'string') return caption;
+  return promptString(caption, 'base_caption');
+}
+
+function promptCharacterCaptions(v4) {
+  const caption = v4?.caption;
+  const characters = (caption && typeof caption === 'object' ? caption : v4)?.char_captions;
+  return Array.isArray(characters) ? characters : [];
+}
+
+function promptSourcePriority(key) {
+  if (/^Comment$/i.test(key)) return 100;
+  if ([...promptParameterWrappers].filter((name) => name !== 'request' && name !== 'comment').includes(compactPromptKey(key))) return 90;
+  if (/^(?:UserComment|EXIF:UserComment)$/i.test(key)) return 80;
+  if (/^COM(?:\.|$)/i.test(key)) return 70;
+  if (/^(?:Description|ImageDescription)$/i.test(key)) return 20;
+  return 0;
+}
+
+function promptSemanticScore(object) {
+  const positive = promptObjectValue(object, 'v4_prompt');
+  const negative = promptObjectValue(object, 'v4_negative_prompt');
+  let score = 0;
+  if (promptV4CaptionText(positive)) score += 1000;
+  score += Math.min(1000, promptCharacterCaptions(positive).length * 200);
+  if (promptV4CaptionText(negative)) score += 300;
+  score += Math.min(500, promptCharacterCaptions(negative).length * 100);
+  if (promptString(object, 'prompt')) score += 100;
+  if (promptString(object, 'uc') || promptString(object, 'negative_prompt')) score += 50;
+  return score;
+}
+
+function promptHasSignals(object) {
+  return ['prompt', 'uc', 'negative_prompt', 'v4_prompt', 'v4_negative_prompt']
+    .some((key) => Object.prototype.hasOwnProperty.call(object, key));
+}
+
+function firstPlainPromptField(fields, names) {
+  const entries = promptFieldEntries(fields);
+  for (const name of names) {
+    const found = entries.find(([key, value]) => (
+      (key.toLowerCase() === name.toLowerCase()
+        || key.toLowerCase().startsWith(`${name.toLowerCase()}.`))
+      && !looksLikePromptJsonObject(value)
+    ));
+    if (found) return String(found[1]);
+  }
+  return '';
+}
+
+function summarizeNovelAiFields(fields, metadataType = 'image metadata', missingReason = '') {
+  const fieldEntries = promptFieldEntries(fields);
+  const candidates = [];
+  for (const [key, value] of fieldEntries) {
+    const object = promptJsonObject(value);
+    if (!object) continue;
+    const flattened = flattenPromptParameters(object);
+    if (promptHasSignals(flattened) || promptSourcePriority(key) > 0) {
+      candidates.push({
+        key, raw: String(value), object: flattened,
+        score: promptSourcePriority(key) + promptSemanticScore(flattened),
+      });
+    }
+  }
+  candidates.sort((left, right) => left.score - right.score);
+  let best = null;
+  let parameters = null;
+  for (const candidate of candidates) {
+    best = candidate;
+    if (!parameters) parameters = {};
+    deepMergePromptObject(parameters, candidate.object);
+  }
+  const direct = {};
+  for (const [key, value] of fieldEntries) {
+    const name = normalizePromptParameterName(key);
+    if (!promptDirectParameters.has(name)) continue;
+    if ((name === 'v4_prompt' || name === 'v4_negative_prompt' || name === 'actual_prompts')
+      && looksLikePromptJsonObject(value)) {
+      const object = promptJsonObject(value);
+      if (object) setPromptObjectValue(direct, name, object);
+    } else if (!looksLikePromptJsonObject(value)) {
+      setPromptObjectValue(direct, name, value);
+    }
+  }
+  if (Object.keys(direct).length) {
+    parameters ||= {};
+    deepMergePromptObject(parameters, direct);
+  }
+  const positive = promptObjectValue(parameters, 'v4_prompt');
+  const negative = promptObjectValue(parameters, 'v4_negative_prompt');
+  const prompt = promptString(parameters, 'prompt')
+    || promptV4CaptionText(positive)
+    || promptString(positive, 'base_caption')
+    || firstPlainPromptField(fields, ['Description', 'ImageDescription', 'Prompt']);
+  const negativePrompt = promptString(parameters, 'uc')
+    || promptString(parameters, 'negative_prompt')
+    || promptV4CaptionText(negative)
+    || promptString(negative, 'base_caption');
+  const actual = promptObjectValue(parameters, 'actual_prompts');
+  const actualPositive = promptObjectValue(actual, 'prompt');
+  const actualNegative = promptObjectValue(actual, 'negative_prompt');
+  const characters = promptCharacterCaptions(positive);
+  const negativeCharacters = promptCharacterCaptions(negative);
+  const actualPrompt = promptV4CaptionText(actualPositive)
+    || promptString(actualPositive, 'base_caption')
+    || promptString(actual, 'prompt');
+  const actualNegativePrompt = promptV4CaptionText(actualNegative)
+    || promptString(actualNegative, 'base_caption')
+    || promptString(actual, 'negative_prompt');
+  const model = promptString(parameters, 'model')
+    || promptString(parameters, 'Source')
+    || firstPlainPromptField(fields, ['Source', 'Software', 'Make', 'Model']);
+  const found = Boolean(prompt || negativePrompt || actualPrompt || actualNegativePrompt
+    || characters.length || negativeCharacters.length);
+  const rawComment = best?.raw || firstPlainPromptField(fields, ['Comment', 'UserComment', 'EXIF:UserComment', 'COM', 'JPEG:COM']);
+  const metadata = Object.fromEntries(promptFieldEntries(fields).map(([key, value]) => [key, String(value)]));
+  const result = {
+    found,
+    prompt,
+    negativePrompt,
+    actualPrompt,
+    actualNegativePrompt,
+    actualCharacters: promptCharacterCaptions(actualPositive),
+    actualNegativeCharacters: promptCharacterCaptions(actualNegative),
+    model,
+    rawComment,
+    parameters,
+    characters,
+    negativeCharacters,
+    v4Prompt: positive || null,
+    v4NegativePrompt: negative || null,
+    metadata,
+    metadataType,
+  };
+  if (found) {
+    result.message = '已在本机读取图片中的提示词与参数。';
+  } else {
+    const reason = missingReason || '未找到可读取的提示词。图片可能没有保存提示词，或已被截图、压缩、转存清除。';
+    result.message = reason;
+    result.missingReason = reason;
+  }
+  return result;
+}
+
+function promptFieldValueScore(value) {
+  const object = promptJsonObject(value);
+  return object ? 1000 + promptSemanticScore(object) + String(value).length : String(value || '').length;
+}
+
+function mergePromptFields(visible, hidden) {
+  const merged = new Map(promptFieldMap(visible));
+  for (const [key, incoming] of promptFieldEntries(hidden)) {
+    if (!merged.has(key)) {
+      merged.set(key, incoming);
+      continue;
+    }
+    const current = merged.get(key);
+    const currentObject = promptJsonObject(current);
+    const incomingObject = promptJsonObject(incoming);
+    if (currentObject && incomingObject) {
+      deepMergePromptObject(currentObject, incomingObject);
+      merged.set(key, JSON.stringify(currentObject));
+    } else if (promptFieldValueScore(incoming) >= promptFieldValueScore(current)) {
+      merged.set(key, incoming);
+    }
+  }
+  return merged;
+}
+
+async function extractNovelAiAlpha(width, height, alphaAt) {
+  const capacity = width * height;
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
+    throw new Error('图片尺寸异常。');
+  }
+  if (capacity < 19 * 8) return null;
+  let position = 0;
+  const nextByte = () => {
+    if (position + 8 > capacity) throw new Error('图片透明通道中的隐藏信息不完整。');
+    let value = 0;
+    for (let bit = 0; bit < 8; bit++, position++) {
+      const x = Math.floor(position / height);
+      const y = position % height;
+      value = value << 1 | (alphaAt(x, y) & 1);
+    }
+    return value;
+  };
+  const magicBytes = new Uint8Array(15);
+  for (let index = 0; index < magicBytes.length; index++) magicBytes[index] = nextByte();
+  const magic = promptAscii(magicBytes, 0, magicBytes.length);
+  const compressed = magic === 'stealth_pngcomp';
+  if (!compressed && magic !== 'stealth_pnginfo') return null;
+  let bitLength = 0;
+  for (let index = 0; index < 4; index++) bitLength = bitLength * 256 + nextByte();
+  if (!bitLength || bitLength % 8 || bitLength > webPromptLimits.metadataBytes * 8
+    || bitLength > capacity - position) {
+    throw new Error('图片隐藏信息长度异常或超过 2 MB。');
+  }
+  let payload = new Uint8Array(bitLength / 8);
+  for (let index = 0; index < payload.length; index++) payload[index] = nextByte();
+  if (compressed) payload = await promptDecompress(payload, 'gzip', '图片透明通道隐藏信息');
+  if (payload.byteLength > webPromptLimits.metadataBytes) {
+    throw new Error('图片隐藏信息解压后超过 2 MB。');
+  }
+  let root;
+  try {
+    const raw = utf8TextDecoder.decode(payload);
+    if (!safePromptJsonDepth(raw)) throw new Error('depth');
+    root = JSON.parse(raw);
+  } catch {
+    throw new Error('图片透明通道中的隐藏信息不是有效的 UTF-8 JSON。');
+  }
+  if (!root || typeof root !== 'object' || Array.isArray(root)) {
+    throw new Error('图片透明通道中的隐藏信息不是 JSON 对象。');
+  }
+  const fields = new Map();
+  let metadataBytes = 0;
+  for (const [key, value] of Object.entries(root)) {
+    if (value == null) continue;
+    const text = typeof value === 'string' ? value : JSON.stringify(value);
+    const bytes = promptTextBytes(text);
+    metadataBytes += bytes;
+    if (metadataBytes > webPromptLimits.metadataBytes) {
+      throw new Error('图片隐藏信息超过 2 MB。');
+    }
+    addPromptField(fields, key, text);
+  }
+  return fields;
+}
+
+async function loadPromptImageSource(file) {
+  if (typeof createImageBitmap === 'function') {
+    try {
+      const bitmap = await createImageBitmap(file, {
+        premultiplyAlpha: 'none',
+        colorSpaceConversion: 'none',
+        imageOrientation: 'none',
+      });
+      return { source: bitmap, close: () => bitmap.close?.() };
+    } catch {
+      // Older WebViews may not support the decoding options.
+    }
+  }
+  const url = URL.createObjectURL(file);
+  const image = new Image();
+  try {
+    await new Promise((resolve, reject) => {
+      image.onload = resolve;
+      image.onerror = () => reject(new Error('无法解码这张原图。'));
+      image.src = url;
+    });
+    return { source: image, close: () => URL.revokeObjectURL(url) };
+  } catch (error) {
+    URL.revokeObjectURL(url);
+    throw error;
+  }
+}
+
+function promptThumbnail(source, width, height) {
+  try {
+    const scale = Math.min(1, 512 / Math.max(width, height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
+    const context = canvas.getContext('2d', { alpha: false });
+    if (!context) return null;
+    context.fillStyle = '#fff';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(source, 0, 0, canvas.width, canvas.height);
+    for (const quality of [0.8, 0.65, 0.5, 0.35]) {
+      const result = canvas.toDataURL('image/jpeg', quality);
+      if (smallPromptPreview(result)) return result;
+    }
+  } catch {
+    // The prompt data is still usable when a thumbnail cannot be generated.
+  }
+  return null;
+}
+
+async function inspectPromptImagePixels(file, image) {
+  const decoded = await loadPromptImageSource(file);
+  let canvas = null;
+  try {
+    const sourceWidth = decoded.source.naturalWidth || decoded.source.width;
+    const sourceHeight = decoded.source.naturalHeight || decoded.source.height;
+    if (sourceWidth !== image.width || sourceHeight !== image.height) {
+      throw new Error('图片尺寸与文件头不一致。');
+    }
+    canvas = document.createElement('canvas');
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    if (!context) throw new Error('无法读取原图的透明通道。');
+    context.drawImage(decoded.source, 0, 0);
+    const pixels = context.getImageData(0, 0, image.width, image.height).data;
+    const fields = await extractNovelAiAlpha(
+      image.width,
+      image.height,
+      (x, y) => pixels[(y * image.width + x) * 4 + 3],
+    );
+    return { fields, preview: promptThumbnail(decoded.source, image.width, image.height) };
+  } finally {
+    canvas?.remove();
+    decoded.close();
+  }
+}
+
+async function readLocalNovelAiImage(file) {
+  utf8TextEncoder ||= new TextEncoder();
+  utf8TextDecoder ||= new TextDecoder('utf-8', { fatal: true });
+  latin1TextDecoder ||= new TextDecoder('iso-8859-1');
+  if (!file || !file.size) throw new Error('未选择有效的图片文件。');
+  if (file.size > webPromptLimits.fileBytes) throw new Error('原图超过 32 MB。');
+  const buffer = await file.arrayBuffer();
+  if (buffer.byteLength > webPromptLimits.fileBytes) throw new Error('原图超过 32 MB。');
+  const bytes = new Uint8Array(buffer);
+  let image;
+  if (bytes.length >= 8 && pngSignature.every((value, index) => bytes[index] === value)) {
+    image = await parsePngMetadata(buffer);
+  } else if (bytes.length >= 12 && promptAscii(bytes, 0, 4) === 'RIFF'
+    && promptAscii(bytes, 8, 12) === 'WEBP') {
+    image = parseWebpMetadata(buffer);
+  } else {
+    throw new Error('目前支持本地读取 NovelAI 保存的 PNG 或 WebP 原图。');
+  }
+
+  let hiddenFields = new Map();
+  let preview = null;
+  let alphaReadError = '';
+  try {
+    const pixels = await inspectPromptImagePixels(file, image);
+    hiddenFields = pixels.fields || new Map();
+    preview = pixels.preview;
+  } catch (error) {
+    alphaReadError = error?.message || '无法读取图片透明通道中的隐藏信息。';
+  }
+  const fields = mergePromptFields(image.fields, hiddenFields);
+  const baseType = image.kind === 'png' ? 'PNG text' : image.hasAlpha ? 'WebP alpha' : 'WebP';
+  const metadataType = hiddenFields.size
+    ? `${image.kind === 'png' ? 'PNG text' : 'WebP'} alpha stealth`
+    : baseType;
+  const webpReason = image.kind === 'webp'
+    ? (image.hasExif
+      ? '检测到 WebP EXIF，但当前 Windows 本地导入尚未解析 WebP EXIF；仅尝试了透明通道隐写，原图未上传。'
+      : 'WebP 当前仅尝试透明通道隐写，尚未解析 WebP EXIF；原图未上传。')
+    : '';
+  const summary = summarizeNovelAiFields(fields, metadataType, webpReason);
+  if (preview) summary.preview = preview;
+  if (alphaReadError) {
+    summary.alphaReadError = alphaReadError;
+    if (!summary.found) summary.message = summary.missingReason = alphaReadError;
+  }
+  if (image.kind === 'webp') {
+    summary.webpExifDetected = image.hasExif;
+    if (!summary.found && !alphaReadError) {
+      summary.message = summary.missingReason = webpReason;
+    }
+  }
+  return summary;
 }
 
 function checkOption(label, checked, change) {
@@ -420,16 +1176,18 @@ function collectPromptArtists(generation, catalog, negative = false) {
   return output;
 }
 
-function weightedPromptArtists(prompt, catalog, targetModel) {
+function weightedPromptArtists(prompt, catalog, targetModel, { allowExplicit = false } = {}) {
   const matches = new Map();
   for (const tag of extractPromptTags(prompt, { trackWeights: true })) {
     const resolved = resolvePromptArtist(tag, catalog);
     if (!resolved) continue;
     const record = preferredArtistRecord(resolved.candidates, targetModel);
     const key = record?.identity || resolved.key;
+    const card = record?.card || (allowExplicit && tag.explicit && !resolved.ambiguous
+      ? { title: resolved.name, prompt: 'artist:' + artistChainEscapeCommas(resolved.name) } : null);
     const existing = matches.get(key);
     const weight = existing && existing.weight !== tag.weight ? null : tag.weight;
-    matches.set(key, { card: record?.card, weight });
+    matches.set(key, { card, weight });
   }
   const weights = new Map();
   let skipped = 0;
@@ -828,7 +1586,7 @@ function showPromptImport(data, {
   const info = node('div', 'prompt-import-info');
   layout.append(media, info);
   body.append(layout);
-  if (!galleryItem && !sample && !references.length) info.append(libraryButton);
+  if (window.Pocket && !galleryItem && !sample && !references.length) info.append(libraryButton);
   if (sample) {
     const source = resourcePhoto;
     if (source.preview) {

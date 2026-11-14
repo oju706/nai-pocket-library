@@ -98,6 +98,33 @@ function tagGalleryTagAction(gallery, tag, label, back = null) {
   if (label) toast(`正在${label}中查找参考标签`);
 }
 
+async function tagGalleryAddArtistToMixer(tag) {
+  const name = tagGalleryNormalizeQuery(tag?.name || tag);
+  const mixer = window.PocketApp?.chain;
+  if (!name) return;
+  if (typeof mixer?.addToMixerPool !== 'function') {
+    toast('画风工坊尚未载入，请重新打开 App。');
+    return;
+  }
+  try {
+    const result = await mixer.addToMixerPool([name], {});
+    if (result?.error) {
+      toast(result.error);
+      return;
+    }
+    const added = Number(result?.added) || 0;
+    const duplicates = Number(result?.duplicates) || 0;
+    const invalid = Number(result?.invalid) || 0;
+    const parts = [`已加入当前工坊池 ${added} 位`];
+    if (duplicates) parts.push(`重复 ${duplicates}`);
+    if (invalid) parts.push(`无效 ${invalid}`);
+    if (result?.storageError) parts.push('本机保存未完成');
+    toast(parts.join('；'));
+  } catch (error) {
+    toast(error?.message || '加入画风工坊失败，请重试。');
+  }
+}
+
 async function tagGalleryFetchJson(path) {
   const response = await fetch(path, { headers: { Accept: 'application/json' } });
   let payload = null;
@@ -144,7 +171,7 @@ function tagGalleryFailure(error) {
 }
 
 function tagGalleryNeedsCredentials(error) {
-  return Number(error?.status) === 401;
+  return !desktopApp && Number(error?.status) === 401;
 }
 
 function tagGallerySuggestionsBox() {
@@ -410,6 +437,10 @@ function tagGalleryRenderSearch(gallery, requestedScroll = 0) {
     const control = button(source.label, 'chip', () => {
       const input = body.querySelector('[data-tag-gallery-query]');
       gallery.query = tagGalleryNormalizeQuery(input?.value ?? gallery.query);
+      if (desktopApp && source.id === 'gelbooru') {
+        openTagGalleryWebsite(PocketSources.tagGalleryWebsiteUrl(source.id, gallery.query, gallery.rating, gallery.sort));
+        return;
+      }
       if (gallery.site === source.id) return;
       gallery.site = source.id;
       gallery.suggestions = [];
@@ -420,7 +451,7 @@ function tagGalleryRenderSearch(gallery, requestedScroll = 0) {
     control.setAttribute('aria-pressed', String(gallery.site === source.id));
     sources.append(control);
   }
-  const website = button('在 App 内打开官网', 'soft tag-gallery-website-open', () => {
+  const website = button(desktopApp ? '打开官网' : '在 App 内打开官网', 'soft tag-gallery-website-open', () => {
     const input = body.querySelector('[data-tag-gallery-query]');
     openTagGalleryWebsite(PocketSources.tagGalleryWebsiteUrl(
       gallery.site,
@@ -629,6 +660,23 @@ function tagGalleryShowPost(gallery, index, requestedScroll = 0) {
         const copyControl = button('复制', 'soft compact', () => copy(tag.name));
         copyControl.setAttribute('aria-label', `复制标签 ${tag.name}`);
         controls.append(copyControl);
+        if (gallery.site === 'danbooru' && kind.section === 'artist') {
+          const mixerControl = button('入池', 'soft compact tag-gallery-mixer-add', async () => {
+            mixerControl.disabled = true;
+            mixerControl.setAttribute('aria-busy', 'true');
+            try {
+              await tagGalleryAddArtistToMixer(tag);
+            } finally {
+              if (mixerControl.isConnected) {
+                mixerControl.disabled = false;
+                mixerControl.removeAttribute('aria-busy');
+              }
+            }
+          });
+          mixerControl.setAttribute('aria-label', `将 ${tag.name} 加入画风工坊当前模型池`);
+          mixerControl.title = '加入工坊当前模型池';
+          controls.append(mixerControl);
+        }
         if (gallery.site === 'danbooru' && kind.section) {
           controls.append(tagGalleryFavoriteButton(tag, (scroll) => tagGalleryShowPost(gallery, index, scroll)));
         }
@@ -734,7 +782,7 @@ function tagGalleryBrowserFallback(initialTag, back, initialSite) {
 }
 
 function showInAppTagGallery(initialTag = '', back = null, initialSite = 'danbooru') {
-  if (!window.Pocket) {
+  if (!window.Pocket && (!desktopApp || initialSite === 'gelbooru')) {
     tagGalleryBrowserFallback(initialTag, back, initialSite);
     return;
   }

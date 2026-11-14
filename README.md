@@ -1,12 +1,19 @@
 # NAI 口袋词库
 
-[下载 Android APK](https://github.com/oju706/nai-pocket-library/raw/main/release/NAI-Pocket-Library.apk)
+[下载 Android APK](https://github.com/oju706/nai-pocket-library/raw/main/release/NAI-Pocket-Library.apk) · [下载 Windows x64 便携版](https://github.com/oju706/nai-pocket-library/raw/main/release/NAI-Pocket-Library-Windows-x64.zip)
 
-中文安卓 App，用于浏览、收藏和复制 NovelAI 标签与画面提示词。安装 APK 后，手机桌面会出现「NAI 口袋词库」。适用 Android 9 或更新版本，使用系统提供的 Android WebView。
+中文工具，用于浏览、收藏和复制 NovelAI 标签与画面提示词。支持 Android 9+ 和 Windows 10/11 x64。Windows 版解压后双击 EXE，同一台电脑的收藏随浏览器资料保留。 [Windows 使用说明](desktop/README.md)
 
 在「图库 → 外站找图」选择 Danbooru 或 Gelbooru，可在 App 内按标签搜索、看图、翻页和复制标签。输入部分标签可选候选，搜索也支持 `*`。画师和角色详情可以带着当前标签打开图库。
 
 「在 App 内打开官网」会在独立的网页页签保留站点自己的搜索、登录和浏览方式。Gelbooru 的图库接口需要用户 ID 和 API Key，直接打开官网可使用站点自己的访问方式。来源选择参考 [NAI Launcher v4.3.1](https://github.com/Aaalice233/Aaalice_NAI_Launcher/releases/tag/v4.3.1)。
+
+## 1.3.20
+
+- Windows 便携版支持韩国画师目录、按需样图、NAX 补充、个人词库、随机工坊和原图提示词读取。手动下载更新 ZIP。Android 继续使用应用内更新。
+- 画师图卡采用珠光票根，收藏与复制移至图片右上角。画师详情、本页筛选和 D 站画师标签可入池。
+- 随机工坊支持 V5 / V4.5 命名画师池、锁定画师、设置各槽倍率和批量生成。成果可保存、添加备注并继续编辑画风串。
+- 「工具」和画面提示词知识的参考区可打开法典图鉴原站。复制的正向提示词可以粘贴回工坊导入画师和可确认的原倍率。 [法典图鉴](https://novelai.quicktagcloud.com/?c=suozhang)
 
 ## 1.3.19
 
@@ -109,7 +116,7 @@
 
 ## 构建与发布
 
-当前版本为 1.3.19（versionCode 23），包名为 `app.nai.pocketlibrary`。构建使用 Windows 上的 PowerShell、JDK 17、Android SDK Platform 35 和 Build Tools 35.0.0。
+当前安卓版本为 1.3.20（versionCode 24），包名为 `app.nai.pocketlibrary`。构建使用 Windows 上的 PowerShell、JDK 17、Android SDK Platform 35 和 Build Tools 35.0.0。Windows 便携版的构建入口是 `desktop/build.ps1`。
 
 脚本使用下面的便携工具目录。可用 `-ToolCache` 指定目录位置。
 

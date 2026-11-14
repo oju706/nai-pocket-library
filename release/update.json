@@ -1,8 +1,8 @@
 {
-  "versionCode": 23,
-  "versionName": "1.3.19",
+  "versionCode": 24,
+  "versionName": "1.3.20",
   "file": "NAI-Pocket-Library.apk",
-  "bytes": 1197657,
-  "sha256": "c97e5292c6e0aab613520eeabbf7afd6ce25c3a6ea7ff806c5e04242e6a51441",
-  "notes": "新增 Gemini 原型的 10 套配色、票券式画师卡和手机底部画风串。工作台支持锁定倍率、归一化、三稿对比和导入原图倍率。原图可查词库 TAG，D 站标签可分类收藏并显示中文。"
+  "bytes": 1218137,
+  "sha256": "b245e275312d290c298624486c2b7e731886cced8195449b531cb0bef76601cc",
+  "notes": "新增随机画风工坊和珠光票根画师卡。可以从个人词库、画师筛选或 D 站加入画师池，独立设置各槽倍率并批量生成、保存成果。法典图鉴可打开原站并粘贴提示词。Windows 便携版可在同一仓库下载。"
 }

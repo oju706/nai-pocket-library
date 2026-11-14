@@ -1,6 +1,8 @@
 'use strict';
 
 const byId = (id) => document.getElementById(id);
+const desktopApp = window.location?.origin === 'http://127.0.0.1:17619';
+if (desktopApp) document.documentElement.classList.add('pocket-desktop');
 const screen = byId('screen');
 const body = byId('screen-body');
 const actions = byId('screen-actions');
@@ -17,6 +19,7 @@ const sections = {
   knowledge: { label: '画面提示词知识', type: '提示词', icon: 'book', subtitle: '收好常用的动作、姿势和构图写法。' },
 };
 const galleryPacksStorageKey = 'pocket-gallery-packs-v1';
+const codexAtlasUrl = 'https://novelai.quicktagcloud.com/?c=suozhang';
 const galleryPacksFallback = [{
   id: 'korean-gallery',
   title: '韩国画风图库',
@@ -31,6 +34,7 @@ const characterFields = [['work', '作品'], ['outfit', '服装／版本'], ['ge
 const genderChoices = [['', '未标注'], ['女性', '女性'], ['男性', '男性'], ['其他', '其他']];
 const speciesChoices = [['', '未标注'], ['人类', '人类'], ['人外', '人外'], ['其他', '其他']];
 let views = { artist: 'grid', character: 'grid', knowledge: 'list' };
+let artistPageCards = [];
 try {
   const saved = readJsonStorageOr('pocket-views', {});
   for (const key of Object.keys(views)) if (['grid', 'list', 'compact'].includes(saved[key])) views[key] = saved[key];
@@ -794,6 +798,29 @@ function openLink(url) {
   else window.open(url, '_blank', 'noopener,noreferrer');
 }
 
+function addArtistCardsToMixer(cards) {
+  const chain = window.PocketApp.chain;
+  const model = chain.mixerModel();
+  const groups = new Map();
+  let skipped = 0;
+  for (const card of cards) {
+    const tag = artistChainCardTag(card);
+    const entry = normalizeArtistChainTag(tag);
+    if (entry.error) { skipped++; continue; }
+    const target = artistModelSeries(card.model) || model;
+    if (!groups.has(target)) groups.set(target, []);
+    groups.get(target).push(entry.tag);
+  }
+  const message = [];
+  for (const [target, tags] of groups) {
+    const result = chain.addToMixerPool(tags, { model: target });
+    message.push(`${target}「${result.pool}」加入 ${result.added} 位${result.duplicates ? `，重复 ${result.duplicates} 位` : ''}`);
+    if (result.storageError || result.error) message.push(result.storageError || result.error);
+  }
+  if (skipped) message.push(`跳过 ${skipped} 个无法识别的标签`);
+  toast(message.join(' · ') || '本页没有可加入的画师。');
+}
+
 function openTagGalleryWebsite(url) {
   if (window.Pocket) return native('openTagGalleryWebsite', url).catch((error) => toast(error.message));
   openLink(url);
@@ -1184,6 +1211,13 @@ async function importPack(address = '') {
 
 function showPackSources() {
   openScreen('其他图包');
+  if (desktopApp) {
+    const list = toolSection('在线资源', '从韩国主库或 NAX 查找画师与样图。');
+    list.append(button('返回画师库', 'soft', closeScreen),
+      button('打开韩国原版图包', 'soft', () => openLink('https://huggingface.co/baqu2213/PoemForSmallFThings')),
+      button('打开 NAX 图鉴', 'soft', () => openLink(PocketSources.nax)));
+    return;
+  }
 
   const start = toolSection('打开图包', '先选择图包入口。自定义 GitHub 可直接浏览；本地 ZIP 会在 App 中导入并建立画师目录。');
   start.classList.add('pack-source-start');
@@ -1432,14 +1466,22 @@ function renderArtistDiscovery() {
   const quickPrimary = node('div', 'artist-quick-primary');
   const chainButton = button('画风串', 'primary compact artist-chain-quick-open', () => window.PocketApp.chain.openArtistChainWorkbench());
   chainButton.setAttribute('aria-label', '画风串');
-  quickPrimary.append(chainButton);
-  quickPrimary.append(button('其他图包', 'soft compact', showPackSources));
-  quickPrimary.append(button(state.galleryFocus ? '退出图墙' : '全屏看图', 'soft compact', () => {
-    const focus = !state.galleryFocus;
-    if (focus) panel.open = false;
-    setGalleryLayout(focus);
-    render();
-  }));
+  const mixerButton = button('随机画风工坊', 'soft compact artist-mixer-quick-open', () => window.PocketApp.chain.openMixer());
+  mixerButton.setAttribute('aria-label', '打开随机画风工坊');
+  const pageMixerButton = button('本页入池', 'soft compact artist-page-mixer', () => addArtistCardsToMixer(artistPageCards));
+  pageMixerButton.setAttribute('aria-label', '将本页画师加入画风工坊池');
+  quickPrimary.append(
+    chainButton,
+    mixerButton,
+    pageMixerButton,
+    button('其他图包', 'soft compact', showPackSources),
+    button(state.galleryFocus ? '退出图墙' : '全屏看图', 'soft compact', () => {
+      const focus = !state.galleryFocus;
+      if (focus) panel.open = false;
+      setGalleryLayout(focus);
+      render();
+    }),
+  );
   const quickCopy = button('', 'soft compact artist-chain-quick-copy', window.PocketApp.chain.copyCurrentArtistChain);
   quick.append(quickPrimary, quickCopy);
   tools.append(quick);
@@ -1791,6 +1833,14 @@ function thumbnail(card, grid, eager = false, compact = false) {
   return box;
 }
 
+function artistPictureTitleParts(title) {
+  const value = String(title ?? '').normalize('NFKC').trim();
+  const match = /^(.*?)\s*[\(（]([^()（）]+)[\)）]\s*$/.exec(value);
+  return match && match[1].trim()
+    ? { title: match[1].trim(), subtitle: match[2].trim() }
+    : { title: value, subtitle: '' };
+}
+
 function row(card, options = {}) {
   const view = options.view || (state.galleryFocus ? 'grid' : views[state.section]);
   const grid = options.grid ?? view === 'grid';
@@ -1809,9 +1859,11 @@ function row(card, options = {}) {
     : [card.work, card.outfit, card.model, card.source || (card.photos.length ? '有配图' : '自建')];
   if (Number.isSafeInteger(card.postCount)) caption.push(`原库 ${number.format(card.postCount)} 条`);
   if (artistPicture) {
+    const displayTitle = artistPictureTitleParts(card.title);
     const fact = Number.isSafeInteger(card.postCount) ? `${number.format(card.postCount)} 作品` : card.source || card.model;
-    text.append(node('span', 'row-title', card.title));
-    if (fact) text.append(node('span', 'artist-card-meta', fact));
+    text.append(node('span', 'row-title', displayTitle.title));
+    const subtitle = [displayTitle.subtitle ? `（${displayTitle.subtitle}）` : '', fact].filter(Boolean).join(' · ');
+    if (subtitle) text.append(node('span', 'artist-card-meta', subtitle));
   } else {
     text.append(node('span', 'row-title', card.title), node('span', 'row-caption', caption.filter(Boolean).join(' · ')));
   }
@@ -1830,19 +1882,34 @@ function row(card, options = {}) {
   item.append(hit);
   if (options.actions) item.append(options.actions);
   else {
-    const controls = node('div', 'card-actions');
-    if (state.mode !== 'personal' && !card.local) {
-      const favorite = favoriteControl(card, artistPicture);
-      if (artistPicture) item.append(favorite);
-      else controls.append(favorite);
-    }
-    if (options.trailing !== false && !state.galleryFocus && (!artistPicture || card.prompt)) {
-      if (card.prompt) controls.append(button(`复制 ${card.title}`, 'icon-button', () => copy(card.prompt), 'copy'));
-      else controls.append(button(`查看 ${card.title}`, 'icon-button', () => showCard(card), 'arrow'));
-    }
-    if (controls.childElementCount) {
-      if (artistPicture) item.classList.add('artist-picture-copy');
-      item.append(controls);
+    if (artistPicture) {
+      const tools = node('div', 'artist-card-tools');
+      tools.setAttribute('role', 'group');
+      tools.setAttribute('aria-label', `${card.title} 快捷操作`);
+      if (state.mode !== 'personal' && !card.local) tools.append(favoriteControl(card, true));
+      if (card.prompt && options.trailing !== false) {
+        const copyControl = button(`复制 ${card.title}`, 'icon-button artist-card-copy', () => copy(card.prompt), 'copy');
+        copyControl.title = '复制原标签';
+        tools.append(copyControl);
+      }
+      if (tools.childElementCount) item.append(tools);
+      if (options.trailing !== false && !card.prompt) {
+        const viewControl = node('div', 'card-actions');
+        viewControl.append(button(`查看 ${card.title}`, 'icon-button', () => showCard(card), 'arrow'));
+        item.append(viewControl);
+      }
+    } else {
+      const controls = node('div', 'card-actions');
+      if (state.mode !== 'personal' && !card.local) {
+        controls.append(favoriteControl(card, false));
+      }
+      if (options.trailing !== false && !state.galleryFocus) {
+        if (card.prompt) controls.append(button(`复制 ${card.title}`, 'icon-button', () => copy(card.prompt), 'copy'));
+        else controls.append(button(`查看 ${card.title}`, 'icon-button', () => showCard(card), 'arrow'));
+      }
+      if (controls.childElementCount) {
+        item.append(controls);
+      }
     }
   }
   if ((artistPicture || artistTicket) && card.prompt && !state.galleryFocus) {
@@ -1859,6 +1926,7 @@ function row(card, options = {}) {
 
 function renderList() {
   previews.disconnect();
+  artistPageCards = [];
   const meta = byId('list-meta');
   meta.replaceChildren();
   const resourceActions = byId('artist-resource-actions');
@@ -1902,6 +1970,14 @@ function renderList() {
         ? '这里是官方指南和韩国社区原帖入口，点开后可查看来源。'
         : '中文基础说明和可复制示例，可加入自己的词库继续编辑。入门知识随应用版本更新。';
     results.append(node('p', 'resource-note', description));
+    if (state.mode === 'online' && state.knowledgeTab === 'references') {
+      const codex = node('section', 'codex-entry');
+      codex.append(
+        button('法典图鉴 · 打开原站', 'soft compact codex-entry-link', () => openLink(codexAtlasUrl)),
+        node('p', 'codex-entry-note', '在原站看图并复制提示词，再回随机画风工坊粘贴。'),
+      );
+      results.append(codex);
+    }
   }
   if (!personal && state.section === 'artist' && window.Pocket) {
     const importer = button(state.importing ? '导入中…' : '导入图包或 ZIP', 'text-button', importPack);
@@ -1991,7 +2067,9 @@ function renderList() {
   if (pages > 1 && state.section !== 'artist') results.append(pageJump(state.page, pages, move));
   const list = node('div', state.galleryFocus ? `gallery gallery-${state.galleryColumns} dense-gallery`
     : views[state.section] === 'grid' ? 'gallery' : 'list');
-  list.append(...matching.slice(start, start + capacity).map((card, index) => row(card, { eager: index < 8 })));
+  const visibleCards = matching.slice(start, start + capacity);
+  if (state.section === 'artist') artistPageCards = visibleCards;
+  list.append(...visibleCards.map((card, index) => row(card, { eager: index < 8 })));
   results.append(list);
   if (pages > 1) results.append(pageSteps(state.page, pages, move));
   if (pages > 1 && state.section === 'artist') results.append(pageJump(state.page, pages, move));
@@ -2014,6 +2092,7 @@ function openScreen(title, back = null, wide = false) {
   screenBack = back;
   document.querySelector('.screen-inner')?.classList.remove('artist-chain-open');
   screen.classList.remove('artist-chain-screen');
+  screen.classList.remove('artist-mixer-screen');
   screen.classList.remove('theme-open');
   screen.classList.toggle('detail-wide', wide);
   byId('screen-title').textContent = title;
@@ -2210,6 +2289,7 @@ function showCard(card, photoIndex = 0, back = null) {
   }
   if (card.prompt) actions.append(button(card.section === 'character' ? '复制此角色提示词' : '复制提示词', 'primary', () => copy(card.prompt)));
   if (card.section === 'artist') {
+    actions.append(button('入池', 'soft', () => addArtistCardsToMixer([card])));
     actions.append(button('加入画风串', 'soft', () => openArtistChainWorkbench({
       defaultModel: artistModelSeries(card.model) || null,
       initialArtists: [card],
@@ -2536,10 +2616,26 @@ async function checkAutomaticUpdate() {
   finally { checkingAutomaticUpdate = false; }
 }
 
+function showDesktopGallery() {
+  openScreen('图库工具');
+  const tools = node('div', 'tool-actions');
+  tools.append(button('选择原图', 'primary', readImagePrompts),
+    button('Danbooru 图库', 'soft', () => showTagGalleries('', showDesktopGallery, 'danbooru')));
+  body.append(tools);
+}
+
 function showTools(initialUpdate) {
   openScreen('设置与工具');
-  const image = toolSection('导入原图生成信息', '选择 NovelAI 保存的 PNG 或 WebP 原图，逐项复制提示词和生成参数。也可保存小预览和生成信息到图库。');
+  const image = toolSection('导入原图生成信息', desktopApp
+    ? '选择 NovelAI 保存的 PNG 或 WebP 原图，在电脑上查看和复制生成参数。'
+    : '选择 NovelAI 保存的 PNG 或 WebP 原图，逐项复制提示词和生成参数。也可保存小预览和生成信息到图库。');
   image.append(button('选择原图', 'primary', readImagePrompts));
+  const codex = toolSection('法典图鉴',
+    '在原站看图并复制提示词，再回随机画风工坊粘贴。');
+  const codexActions = node('div', 'tool-actions');
+  codexActions.append(button('法典图鉴 · 打开原站', 'soft', () => openLink(codexAtlasUrl)),
+    button('打开随机画风工坊', 'soft', () => window.PocketApp.chain.openMixer({ back: () => showTools(initialUpdate) })));
+  codex.append(codexActions);
   const tagGallery = toolSection('外站图库连接', '配置 App 内图库的 API 凭据。也可以从图库直接打开官网。');
   if (window.Pocket) {
     tagGallery.append(button('管理连接与凭据', 'soft', () => {
@@ -2547,10 +2643,13 @@ function showTools(initialUpdate) {
       else toast('图库连接设置尚未载入，请重新打开 App。');
     }));
   } else {
-    tagGallery.append(node('p', 'detail-note', '浏览器预览不保存图库凭据，请在 Android App 中配置。'));
+    tagGallery.append(node('p', 'detail-note', desktopApp
+      ? 'Danbooru 使用公开接口。需要登录的页面可在浏览器中打开。'
+      : '浏览器预览不保存图库凭据，请在 Android App 中配置。'));
   }
   const dictionary = toolSection('中文标签词典',
-    '可选下载 ffdkj 丹波鲁中英词典，在 D 站标签、词库原词、参考标签和画风串旁显示中文译名。约 25 MB，仅在你点击后下载；原词与复制内容保持不变。');
+    desktopApp ? 'Windows 版显示原始标签。安卓可安装 ffdkj 丹波鲁中英词典。'
+      : '可选下载 ffdkj 丹波鲁中英词典，在 D 站标签、词库原词、参考标签和画风串旁显示中文译名。约 25 MB，仅在你点击后下载；原词与复制内容保持不变。');
   dictionary.append(button(window.Pocket ? '打开词典安装与管理' : '查看词典说明', window.Pocket
     ? 'soft' : 'subtle', () => showTagDictionarySettings(() => showTools(initialUpdate))));
   const backup = toolSection('个人词库备份', '备份收藏、自己写的条目和自选配图。图库原图请单独保留，换机后可重新导入。');
@@ -2617,7 +2716,9 @@ function showTools(initialUpdate) {
       if (cacheRevision === screenRevision) cacheLimit.disabled = cacheClear.disabled = false;
     });
   }
-  const update = toolSection('应用版本更新', '打开 App 时自动检查并下载新版。下载后校验长度、签名和版本，由你在安卓系统中确认安装。');
+  const update = toolSection('应用版本更新', desktopApp
+    ? 'Windows 便携版更新时下载并解压新版 ZIP。'
+    : '打开 App 时自动检查并下载新版。下载后校验长度、签名和版本，由你在安卓系统中确认安装。');
   const version = node('p', 'detail-note', '正在读取版本…');
   const repo = textInput('input', '', 'owner/repo 或 GitHub 仓库链接', 300);
   const result = node('div', 'update-result');
@@ -2679,8 +2780,15 @@ function showTools(initialUpdate) {
     if (!info.repository) result.append(node('p', '', '发布仓库尚未配置，当前无法检查新版。'));
   }).catch((error) => { version.textContent = error.message; });
   else {
-    version.textContent = '当前为浏览器预览，安卓 App 中可检查版本。';
-    saveRepo.disabled = check.disabled = true;
+    if (desktopApp) {
+      version.remove();
+      repo.closest('.field')?.remove();
+      controls.replaceChildren(button('打开 Windows 下载页', 'soft', () =>
+        openLink('https://github.com/oju706/nai-pocket-library/tree/main/release')));
+    } else {
+      version.textContent = '当前为浏览器预览，安卓 App 中可检查版本。';
+      saveRepo.disabled = check.disabled = true;
+    }
   }
   const thanks = toolSection('来源与感谢', '感谢韩国 Arca Live 社区作者 bequiet / baqu2213 分享原版画师库和查看器；感谢 Carlyone 的 NAX 图库、ffdkj 的丹波鲁中英词典（MIT），以及韩国社区和 NovelAI 官方资料。');
   thanks.append(button('原版画师资源', 'text-button', () => openLink('https://arca.live/b/aiart/185691299')),
@@ -2694,7 +2802,10 @@ function showTools(initialUpdate) {
 }
 
 byId('tools').addEventListener('click', showTools);
-byId('gallery').addEventListener('click', () => showGallery());
+byId('gallery').addEventListener('click', () => {
+  if (desktopApp) showDesktopGallery();
+  else showGallery();
+});
 byId('add').addEventListener('click', () => showEditor());
 byId('theme-trigger').addEventListener('click', showThemePicker);
 byId('artist-dock-open').addEventListener('click', () => window.PocketApp.chain.openArtistChainWorkbench());
@@ -2726,7 +2837,7 @@ window.PocketForeground = checkAutomaticUpdate;
 state.galleryPacks = readCachedGalleryPacks() || galleryPacksFallback;
 ensureKorean();
 render();
-loadGalleryPacks();
+if (!desktopApp) loadGalleryPacks();
 loadPersonal();
 loadPacks();
 checkForSavedDirectory();
