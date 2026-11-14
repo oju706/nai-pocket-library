@@ -999,6 +999,15 @@ function promptImageMetadataType(image, hasHiddenFields) {
   return labels.join(' + ') || image.kind.toUpperCase();
 }
 
+async function readSameOriginPromptPhoto(path) {
+  if (!path.startsWith('/') || new URL(path, location.origin).origin !== location.origin) {
+    throw new Error('这个样图地址不受支持。');
+  }
+  const response = await fetch(path, { mode: 'same-origin', redirect: 'error' });
+  if (!response.ok) throw new Error('无法读取这张样图，请检查网络后重试。');
+  return readLocalNovelAiImage(await response.blob());
+}
+
 async function readLocalNovelAiImage(file) {
   utf8TextEncoder ||= new TextEncoder();
   utf8TextDecoder ||= new TextDecoder('utf-8', { fatal: true });

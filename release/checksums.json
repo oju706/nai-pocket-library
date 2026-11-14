@@ -6,8 +6,8 @@
   },
   {
     "Name": "NAI-Pocket-Library-source.zip",
-    "Bytes": 1256117,
-    "SHA256": "5fb52c9a3e1d6d226ab7aaa6e8670c9e21b48620a1c144c294d88823f2360469"
+    "Bytes": 1269321,
+    "SHA256": "8d2f512dad9c3ba2255764df4421b0c374539aff93cf9bfee9a8d4d72c8d22fe"
   },
   {
     "Name": "update.json",
@@ -16,7 +16,7 @@
   },
   {
     "Name": "NAI-Pocket-Library-Windows-x64.zip",
-    "Bytes": 4317350,
-    "SHA256": "06ce050a52c519aa123c90b5cc7054e6c62ba0299a499c1fab0855b45c1286ae"
+    "Bytes": 4363370,
+    "SHA256": "05b5769596b927b8e544701a3b650770292311537c818b9d37a2521b8bf39de2"
   }
 ]

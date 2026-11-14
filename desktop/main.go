@@ -29,10 +29,8 @@ import (
 
 const (
 	appID       = "nai-pocket-library.desktop"
-	appVersion  = "1.3.21"
-	desktopHost = "127.0.0.1:17619"
-	desktopURL  = "http://" + desktopHost
-	homeURL     = desktopURL + "/index.html"
+	appVersion  = "1.3.22"
+	desktopPort = 17619
 
 	contentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 	maxHeaderBytes        = 64 * 1024
@@ -68,20 +66,26 @@ func upstreamFailure(message string) error {
 }
 
 type application struct {
-	webRoot  string
-	korean   *koreanLibrary
-	nax      *naxLibrary
-	danbooru *http.ServeMux
+	webRoot     string
+	port        int
+	korean      *koreanLibrary
+	nax         *naxLibrary
+	danbooru    *http.ServeMux
+	onlinePacks *onlinePackLibrary
+	community   *communityZip
 }
 
-func newApplication(webRoot, cacheRoot string) *application {
+func newApplication(webRoot, cacheRoot string, port int) *application {
 	galleries := http.NewServeMux()
 	registerDanbooru(galleries)
 	return &application{
-		webRoot:  webRoot,
-		korean:   newKoreanLibrary(webRoot, cacheRoot),
-		nax:      newNAXLibrary(cacheRoot),
-		danbooru: galleries,
+		webRoot:     webRoot,
+		port:        port,
+		korean:      newKoreanLibrary(webRoot, cacheRoot),
+		nax:         newNAXLibrary(cacheRoot),
+		danbooru:    galleries,
+		onlinePacks: newOnlinePackLibrary(cacheRoot),
+		community:   newCommunityZip(webRoot, cacheRoot),
 	}
 }
 
@@ -90,10 +94,16 @@ func main() {
 
 	webFlag := flag.String("web", "", "web asset directory (defaults to web next to the executable)")
 	noBrowser := flag.Bool("no-browser", false, "serve without opening a browser")
+	port := flag.Int("port", desktopPort, "local port for a separate preview with -no-browser")
 	flag.Parse()
 	if flag.NArg() != 0 {
 		fatal("不接受位置参数")
 	}
+	if *port < 1024 || *port > 65535 || (*port != desktopPort && !*noBrowser) {
+		fatal("自选本地端口只能与 -no-browser 一起使用")
+	}
+	host := desktopAddress(*port)
+	homeURL := "http://" + host + "/index.html"
 
 	webRoot, err := resolveWebRoot(*webFlag)
 	if err != nil {
@@ -107,21 +117,21 @@ func main() {
 		fatal("无法创建本地缓存目录：%v", err)
 	}
 
-	listener, existing, err := acquireListener()
+	listener, existing, err := acquireListener(host, *port)
 	if err != nil {
 		fatal("%v；不会打开其他程序的页面", err)
 	}
 	if existing {
 		log.Printf("检测到同一 App 已在运行，重新打开 %s", homeURL)
 		if !*noBrowser {
-			if _, err := openApplicationWindow(cacheRoot); err != nil {
+			if _, err := openApplicationWindow(cacheRoot, homeURL); err != nil {
 				log.Printf("无法重新打开窗口：%v；请手动访问 %s", err, homeURL)
 			}
 		}
 		return
 	}
 
-	app := newApplication(webRoot, cacheRoot)
+	app := newApplication(webRoot, cacheRoot, *port)
 	server := &http.Server{
 		Handler:           app,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -143,7 +153,7 @@ func main() {
 	log.Printf("NAI 口袋词库 %s 正在监听 %s", appVersion, homeURL)
 	var browserDone <-chan struct{}
 	if !*noBrowser {
-		browserDone, err = openApplicationWindow(cacheRoot)
+		browserDone, err = openApplicationWindow(cacheRoot, homeURL)
 		if err != nil {
 			log.Printf("无法自动打开浏览器：%v；请手动访问 %s", err, homeURL)
 		}
@@ -229,24 +239,28 @@ func applicationCacheRoot() (string, error) {
 	return root, nil
 }
 
-func acquireListener() (net.Listener, bool, error) {
+func desktopAddress(port int) string {
+	return "127.0.0.1:" + strconv.Itoa(port)
+}
+
+func acquireListener(host string, port int) (net.Listener, bool, error) {
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		listener, err := net.Listen("tcp4", desktopHost)
+		listener, err := net.Listen("tcp4", host)
 		if err == nil {
 			return listener, false, nil
 		}
-		if isAppRunning() {
+		if isAppRunning(host, port) {
 			return nil, true, nil
 		}
 		if time.Now().After(deadline) {
-			return nil, false, fmt.Errorf("无法绑定 %s", desktopHost)
+			return nil, false, fmt.Errorf("无法绑定 %s", host)
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
 }
 
-func isAppRunning() bool {
+func isAppRunning(host string, port int) bool {
 	transport := &http.Transport{
 		Proxy:               nil,
 		DialContext:         (&net.Dialer{Timeout: time.Second}).DialContext,
@@ -265,7 +279,7 @@ func isAppRunning() bool {
 	}
 	defer transport.CloseIdleConnections()
 
-	request, err := http.NewRequest(http.MethodGet, desktopURL+"/api/desktop.json", nil)
+	request, err := http.NewRequest(http.MethodGet, "http://"+host+"/api/desktop.json", nil)
 	if err != nil {
 		return false
 	}
@@ -285,10 +299,16 @@ func isAppRunning() bool {
 	if json.Unmarshal(data, &marker) != nil {
 		return false
 	}
-	return marker.App == appID && marker.Port == 17619
+	if marker.App != appID || marker.Port != port {
+		return false
+	}
+	if marker.Version != appVersion {
+		fatal("当前已运行 Windows %s。关闭旧窗口和旧版程序后，再打开 %s。", marker.Version, appVersion)
+	}
+	return true
 }
 
-func openApplicationWindow(cacheRoot string) (<-chan struct{}, error) {
+func openApplicationWindow(cacheRoot, homeURL string) (<-chan struct{}, error) {
 	profile := filepath.Join(cacheRoot, "edge-profile")
 	if err := os.MkdirAll(profile, 0o700); err != nil {
 		return nil, err
@@ -350,7 +370,7 @@ func regularFile(filename string) bool {
 func (app *application) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	headers := writer.Header()
 	setSecurityHeaders(headers)
-	if request.Host != desktopHost || !isLoopbackRequest(request.RemoteAddr) {
+	if request.Host != desktopAddress(app.port) || !isLoopbackRequest(request.RemoteAddr) {
 		writeAPIFailure(writer, request, http.StatusForbidden, "请求来源不受支持")
 		return
 	}
@@ -379,8 +399,8 @@ func (app *application) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		marker := desktopMarker{
 			App:     appID,
 			Version: appVersion,
-			Port:    17619,
-			Home:    homeURL,
+			Port:    app.port,
+			Home:    "http://" + desktopAddress(app.port) + "/index.html",
 		}
 		data, _ := json.Marshal(marker)
 		headers.Set("Cache-Control", "no-store")
@@ -394,6 +414,15 @@ func (app *application) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		return
 	case "/api/nax.json":
 		app.serveNAXCatalog(writer, request)
+		return
+	case "/api/gallery-packs.json", "/api/online-pack.json":
+		app.onlinePacks.ServeHTTP(writer, request)
+		return
+	case communityCatalogRoute:
+		app.community.ServeHTTP(writer, request)
+		return
+	case "/api/online-pack-download":
+		app.servePackDownload(writer, request)
 		return
 	case "/api/tag-gallery/posts", "/api/tag-gallery/tags":
 		app.danbooru.ServeHTTP(writer, request)
@@ -410,6 +439,15 @@ func (app *application) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	}
 	if strings.HasPrefix(request.URL.Path, "/nax-image/") {
 		app.serveNAXImage(writer, request)
+		return
+	}
+	if strings.HasPrefix(request.URL.Path, "/online-pack-image/") ||
+		strings.HasPrefix(request.URL.Path, "/online-pack-thumb/") {
+		app.onlinePacks.ServeHTTP(writer, request)
+		return
+	}
+	if strings.HasPrefix(request.URL.Path, communityPhotoRoute) {
+		app.community.ServeHTTP(writer, request)
 		return
 	}
 	if strings.HasPrefix(request.URL.Path, "/api/") {

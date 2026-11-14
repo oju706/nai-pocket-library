@@ -14,6 +14,29 @@
   let recentRecords = null;
   const unmarkedDate = '__unmarked_date__';
 
+  async function desktopPackResponse(url) {
+    const response = await fetch(url, { cache: 'no-store', mode: 'same-origin', redirect: 'error' });
+    if (response.ok) return response;
+    const details = await response.json().catch(() => null);
+    throw new Error(details?.error || '暂时无法读取图包，请重试。');
+  }
+
+  async function downloadDesktopPhotos(mode, revision, ids) {
+    const query = new URLSearchParams({ mode, revision });
+    for (const id of ids) query.append('id', id);
+    const response = await desktopPackResponse('/api/online-pack-download?' + query);
+    const file = await response.blob();
+    const extensions = { 'image/png': 'png', 'image/webp': 'webp', 'image/jpeg': 'jpg', 'application/zip': 'zip' };
+    const extension = extensions[file.type];
+    if (!extension || !file.size) throw new Error('没有收到有效的原图文件。');
+    const link = node('a');
+    link.href = URL.createObjectURL(file);
+    link.download = ids.length === 1 ? `NAI-${ids[0]}.${extension}` : 'NAI-原图.zip';
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 10000);
+    return true;
+  }
+
   function isoDate(value) {
     if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return '';
     const date = new Date(`${value}T00:00:00.000Z`);
@@ -226,9 +249,11 @@
       saving = true;
       updateSave();
       try {
-        const result = await native(saveAction, JSON.stringify({ revision, ids }));
+        const result = desktopApp ? await downloadDesktopPhotos(remote ? 'community' : 'github', revision, ids)
+          : await native(saveAction, JSON.stringify({ revision, ids }));
         if (screen !== screenRevision) return;
-        if (result === true) toast(ids.length === 1 ? '已保存原图' : '已保存原图 ZIP');
+        if (result === true) toast(desktopApp ? '已发起下载'
+          : ids.length === 1 ? '已保存原图' : '已保存原图 ZIP');
         else if (result !== null) throw new Error('没有收到保存结果。');
       } catch (error) {
         if (screen === screenRevision) toast(error?.message || '保存原图失败，请重试。');
@@ -262,7 +287,8 @@
         metadata.disabled = true;
         metadata.textContent = '正在读取…';
         try {
-          const data = await native('photoMetadata', item.original);
+          const data = desktopApp ? await readSameOriginPromptPhoto(item.original)
+            : await native('photoMetadata', item.original);
           if (screen !== screenRevision) return;
           if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('没有收到图片的读取结果。');
           showPromptImport(data, {
@@ -359,7 +385,8 @@
       body.append(view);
       showImage(showOriginal);
       const detailActions = node('div', 'online-pack-detail-actions');
-      detailActions.append(metadata, save, saveToGallery, exportHtml);
+      detailActions.append(metadata, save);
+      if (!desktopApp) detailActions.append(saveToGallery, exportHtml);
       actions.append(detailActions);
       bindSaveState(() => {
         save.disabled = saving || gallerySaving;
@@ -436,7 +463,7 @@
 
     function showList() {
       openScreen(packLabel, back);
-      if (!window.Pocket) {
+      if (!window.Pocket && (!desktopApp || local)) {
         body.append(node('p', 'online-pack-note', `请在安卓 App 中打开${packLabel}。`));
         return;
       }
@@ -469,9 +496,9 @@
       if (shared) {
         const tools = node('div', 'online-pack-heading');
         if (remote) {
-          tools.append(retry,
-            button('导入本地 ZIP', 'soft compact', () => showPack(showList, 'local')),
-            button('自定义 GitHub 仓库', 'soft compact', () => showPack(showList, 'custom')));
+          tools.append(retry);
+          if (!desktopApp) tools.append(button('导入本地 ZIP', 'soft compact', () => showPack(showList, 'local')));
+          tools.append(button('自定义 GitHub 仓库', 'soft compact', () => showPack(showList, 'custom')));
         } else {
           tools.append(importZip, forgetZip);
         }
@@ -799,7 +826,14 @@
         content.replaceChildren();
         actions.replaceChildren();
         try {
-          const result = remote ? await native('openRemoteSharedStylePack') : await native('openOnlinePack', url);
+          let result;
+          if (desktopApp) {
+            const endpoint = remote ? '/api/remote-shared-style.json' + (checking ? '?check=1' : '')
+              : '/api/online-pack.json?' + new URLSearchParams({ address: url });
+            result = await (await desktopPackResponse(endpoint)).json();
+          } else {
+            result = remote ? await native('openRemoteSharedStylePack') : await native('openOnlinePack', url);
+          }
           if (screen !== screenRevision) return;
           if (!result) throw new Error('图包目录格式不正确。');
           changed = replaceCatalog(result, checking);

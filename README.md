@@ -8,6 +8,11 @@
 
 「在 App 内打开官网」会在独立的网页页签保留站点自己的搜索、登录和浏览方式。Gelbooru 的图库接口需要用户 ID 和 API Key，直接打开官网可使用站点自己的访问方式。来源选择参考 [NAI Launcher v4.3.1](https://github.com/Aaalice233/Aaalice_NAI_Launcher/releases/tag/v4.3.1)。
 
+## 1.3.22 · Windows
+
+- 「图库 → 其他图包」可在应用内打开韩国画风图库、Arca 在线社区画风和自定义 GitHub 图包，目录与图片按需读取。
+- 沿用手机版的分类和筛选，Arca 图包支持按原帖分组、按模型筛选及 2 至 4 列浏览。可查看图内生成参数、单张下载或把所选原图保存为 ZIP。
+
 ## 1.3.21 · Windows
 
 - 修复 Windows 原图导入，支持读取 WebP EXIF 与 JPEG EXIF／COM。PNG 文本和 PNG、WebP 的透明通道隐藏信息继续可读。

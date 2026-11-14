@@ -1,7 +1,7 @@
 'use strict';
 
 const byId = (id) => document.getElementById(id);
-const desktopApp = window.location?.origin === 'http://127.0.0.1:17619';
+const desktopApp = /^http:\/\/127\.0\.0\.1:\d+$/.test(window.location?.origin || '') && !window.Pocket;
 if (desktopApp) document.documentElement.classList.add('pocket-desktop');
 const screen = byId('screen');
 const body = byId('screen-body');
@@ -1209,13 +1209,29 @@ async function importPack(address = '') {
   }
 }
 
-function showPackSources() {
-  openScreen('其他图包');
+function showPackSources(back = null) {
+  openScreen('其他图包', back);
   if (desktopApp) {
-    const list = toolSection('在线资源', '从韩国主库或 NAX 查找画师与样图。');
-    list.append(button('返回画师库', 'soft', closeScreen),
-      button('打开韩国原版图包', 'soft', () => openLink('https://huggingface.co/baqu2213/PoemForSmallFThings')),
-      button('打开 NAX 图鉴', 'soft', () => openLink(PocketSources.nax)));
+    const list = toolSection('在线图包', '点开目录即可浏览，缩略图和原图按需加载。');
+    const restore = () => showPackSources(back);
+    for (const pack of state.galleryPacks) {
+      const row = node('div', 'pack-source pack-source-row');
+      const label = node('div');
+      label.append(node('strong', '', pack.title), node('small', '', sections[pack.section].label));
+      row.append(label, button(`打开${pack.title}`, 'soft compact', () => window.showPresetOnlinePack(pack, restore)));
+      list.append(row);
+    }
+    const controls = node('div', 'tool-actions');
+    controls.append(button('在线社区画风', 'soft', () => showRemoteSharedStylePack(restore)),
+      button('自定义 GitHub 图包', 'soft', () => showOnlinePack(restore)),
+      button('刷新入口', 'text-button', async () => {
+        const current = screenRevision;
+        const refreshed = await loadGalleryPacks();
+        if (current !== screenRevision) return;
+        if (refreshed) restore();
+        else toast('暂时无法刷新，仍可打开已有图包。');
+      }));
+    list.append(controls);
     return;
   }
 
@@ -1474,7 +1490,7 @@ function renderArtistDiscovery() {
     chainButton,
     mixerButton,
     pageMixerButton,
-    button('其他图包', 'soft compact', showPackSources),
+    button('其他图包', 'soft compact', () => showPackSources()),
     button(state.galleryFocus ? '退出图墙' : '全屏看图', 'soft compact', () => {
       const focus = !state.galleryFocus;
       if (focus) panel.open = false;
@@ -1698,7 +1714,7 @@ function render() {
     const entryGroup = node('div', 'resource-entry-group');
     entryGroup.setAttribute('role', 'group');
     entryGroup.setAttribute('aria-label', '其他画师图包入口');
-    if (window.Pocket) {
+    if (window.Pocket || desktopApp) {
       entryGroup.append(
         button('在线社区画风', 'soft compact', () => showRemoteSharedStylePack()),
         button('自定义图库', 'soft compact', () => showOnlinePack()),
@@ -2193,16 +2209,8 @@ function showPhotos(card, initialIndex = 0, detailBack = null) {
         readMetadata.textContent = '正在读取提示词与参数…';
         readMetadata.setAttribute('aria-busy', 'true');
         try {
-          let data;
-          if (window.Pocket) {
-            data = await native('photoMetadata', ref.url);
-          } else {
-            const response = await fetch(ref.url, { mode: 'same-origin', redirect: 'error' });
-            if (!response.ok) throw new Error('无法读取这张样图，请检查网络后重试。');
-            const image = await response.blob();
-            if (revision !== screenRevision || activeRequest !== metadataRequest) return;
-            data = await readLocalNovelAiImage(image);
-          }
+          const data = window.Pocket
+            ? await native('photoMetadata', ref.url) : await readSameOriginPromptPhoto(ref.url);
           if (revision !== screenRevision || photoIndex !== index || activeRequest !== metadataRequest || readMetadata.parentNode !== metadata) return;
           if (!data || typeof data !== 'object') throw new Error('没有收到这张样图的读取结果。');
           showPromptImport(data, {
@@ -2626,9 +2634,10 @@ async function checkAutomaticUpdate() {
 }
 
 function showDesktopGallery() {
-  openScreen('图库工具');
+  openScreen('图库');
   const tools = node('div', 'tool-actions');
-  tools.append(button('选择原图', 'primary', readImagePrompts),
+  tools.append(button('其他图包', 'primary', () => showPackSources(showDesktopGallery)),
+    button('选择原图', 'soft', readImagePrompts),
     button('Danbooru 图库', 'soft', () => showTagGalleries('', showDesktopGallery, 'danbooru')));
   body.append(tools);
 }
@@ -2848,7 +2857,7 @@ window.PocketForeground = checkAutomaticUpdate;
 state.galleryPacks = readCachedGalleryPacks() || galleryPacksFallback;
 ensureKorean();
 render();
-if (!desktopApp) loadGalleryPacks();
+loadGalleryPacks();
 loadPersonal();
 loadPacks();
 checkForSavedDirectory();
