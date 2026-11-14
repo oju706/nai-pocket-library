@@ -628,6 +628,10 @@ function tagGalleryShowPost(gallery, index, requestedScroll = 0) {
         const controls = node('div', 'tag-gallery-tag-actions');
         const copyControl = button('复制', 'soft compact', () => copy(tag.name));
         copyControl.setAttribute('aria-label', `复制标签 ${tag.name}`);
+        controls.append(copyControl);
+        if (gallery.site === 'danbooru' && kind.section) {
+          controls.append(tagGalleryFavoriteButton(tag, (scroll) => tagGalleryShowPost(gallery, index, scroll)));
+        }
         const menuActions = node('div', 'tag-gallery-tag-menu-actions');
         menuActions.append(button('用它搜图', 'soft compact', () => tagGallerySearchTag(gallery, tag)));
         if (kind.section) {
@@ -665,7 +669,7 @@ function tagGalleryShowPost(gallery, index, requestedScroll = 0) {
         }
         const menu = node('details', 'tag-gallery-tag-menu');
         menu.append(node('summary', '', '更多'), menuActions);
-        controls.append(copyControl, menu);
+        controls.append(menu);
         row.append(name, controls);
         rows.append(row);
       }

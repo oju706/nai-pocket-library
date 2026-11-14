@@ -24,60 +24,15 @@ const galleryPacksFallback = [{
   address: 'oju706/nai-pocket-library',
   defaultRating: 'unknown',
 }];
-const state = {
-  section: 'artist', mode: 'online', model: 'V5', kind: 'all', knowledgeTab: 'basic', artistSource: 'korean',
-  page: 0, online: null, onlineTask: null, onlineError: false, hasOnline: false,
-  personal: [], personalError: false, packs: [], pack: null, packRows: [],
-  packMessage: '', importing: false, importingRemote: false,
-  galleryPacks: readCachedGalleryPacks() || galleryPacksFallback,
-  artistGroup: 'all', galleryFocus: false, galleryColumns: 4, artistShuffle: 0, artistOrder: 'name',
-  artistPostBand: 'all', koreanPostBands: [],
-  characterFilters: {},
-  koreanPack: 'all', korean: null, koreanTask: null, koreanError: false, koreanChecking: false, koreanStatus: '',
-  tagGalleryReturn: null,
-};
 const koreanPacks = [['curated', 'Curated 精选'], ['33000', '33000-Q'], ['55000', '55000-Q']];
 const koreanCatalogs = new Map();
-const artistDrawBatchSize = 10;
-const artistDrawStoragePrefix = 'pocket-artist-draw-v1';
-const artistChainLegacyStorageKey = 'pocket-artist-chain-v1';
-const artistChainStorageKey = 'pocket-artist-chain-v2';
-const artistChainModels = ['V5', 'V4.5'];
-const artistChainCapacity = 256;
-const artistChainCopiesPerModel = 8;
-const artistChainCopyNameMaxLength = 32;
-const artistDrawPoolConfig = [
-  {
-    id: 'filtered',
-    label: () => '当前筛选',
-    rule: (context) => `filter:${JSON.stringify(context.filterKey)}`,
-    cards: (context) => context.matching,
-  },
-  {
-    id: 'all',
-    label: () => '当前来源全部',
-    rule: () => 'all',
-    cards: (context) => context.cards,
-  },
-  {
-    id: 'post-band',
-    label: (item) => item.band === 'unknown' ? '作品数 · 未统计'
-      : `作品数 · ${number.format(item.band)}–${number.format(Number(item.band) + 99)}`,
-    items: (context) => context.korean
-      ? context.postBands.map((band) => ({ band, key: `post-band:${band}` }))
-      : [],
-    rule: (_context, item) => `post:${item.band}`,
-    cards: (context, item) => context.cards.filter((card) => matchesPostCountBand(card, item.band)),
-  },
-];
-let artistDrawSession = null;
 const knowledgeKinds = [['all', '全部'], ...PocketSources.knowledgeKinds];
 const characterFields = [['work', '作品'], ['outfit', '服装／版本'], ['gender', '性别'], ['species', '类型']];
 const genderChoices = [['', '未标注'], ['女性', '女性'], ['男性', '男性'], ['其他', '其他']];
 const speciesChoices = [['', '未标注'], ['人类', '人类'], ['人外', '人外'], ['其他', '其他']];
 let views = { artist: 'grid', character: 'grid', knowledge: 'list' };
 try {
-  const saved = JSON.parse(localStorage.getItem('pocket-views') || '{}');
+  const saved = readJsonStorageOr('pocket-views', {});
   for (const key of Object.keys(views)) if (['grid', 'list', 'compact'].includes(saved[key])) views[key] = saved[key];
 } catch { /* Default views work when preferences cannot be read. */ }
 
@@ -170,6 +125,7 @@ function favoriteIdentity(card) {
 }
 
 function findSavedCard(card, cards = state.personal) {
+  if (card.id?.startsWith('danbooru-tag:')) return findTagGallerySavedCard(card, cards);
   return cards.find((saved) => saved.section === card.section
     && (card.section === 'knowledge'
       ? saved.from === card.id
@@ -290,114 +246,6 @@ function favoriteControl(card, compact = false) {
   return favorite;
 }
 
-function artistDrawSourceReady() {
-  if (state.section !== 'artist' || state.mode !== 'online') return false;
-  if (isKorean()) return Array.isArray(state.korean) && !state.koreanTask;
-  if (state.artistSource === 'nax') return Array.isArray(state.online) && !state.onlineTask;
-  if (state.artistSource === 'imported') return Boolean(state.pack) && Array.isArray(state.packRows) && !state.packMessage;
-  return false;
-}
-
-function artistDrawContext() {
-  if (!artistDrawSourceReady()) return null;
-  const korean = isKorean();
-  let cards;
-  let sourceId;
-  let sourceLabel;
-  let postBands = [];
-  if (korean) {
-    cards = state.korean.filter((card) => card.section === 'artist');
-    sourceId = `korean:${state.koreanPack}`;
-    sourceLabel = state.koreanPack === 'all' ? '韩国全部图包'
-      : `韩国 · ${koreanPacks.find(([id]) => id === state.koreanPack)?.[1] || state.koreanPack}`;
-    postBands = state.koreanPostBands;
-  } else if (state.artistSource === 'nax') {
-    cards = state.online.filter((card) => card.section === 'artist' && card.model === state.model);
-    sourceId = `nax:${state.model}`;
-    sourceLabel = `NAX · ${state.model}`;
-  } else {
-    cards = state.packRows.filter((card) => card.section === 'artist');
-    sourceId = `imported:${state.pack.id}`;
-    sourceLabel = `已导入 · ${state.pack.name}`;
-  }
-  const terms = cardSearchTerms(query.value, 'artist');
-  const postBand = korean ? state.artistPostBand : 'all';
-  const matching = cards.filter((card) => {
-    if (!matchesArtistGroup(card, state.artistGroup) || !matchesPostCountBand(card, postBand)) return false;
-    return matchesCardSearch(card, terms);
-  });
-  const filterKey = {
-    keywords: [...new Set(terms)].sort(),
-    group: state.artistGroup,
-    postBand,
-  };
-  return {
-    cards, matching, sourceId, sourceLabel, korean, postBands,
-    filterKey, key: JSON.stringify({ sourceId, filterKey }),
-  };
-}
-
-function artistDrawPoolOptions(context) {
-  return artistDrawPoolConfig.flatMap((definition) => {
-    const items = definition.items ? definition.items(context) : [null];
-    return items.map((item) => ({
-      key: item?.key || definition.id,
-      label: definition.label(item),
-      ruleKey: definition.rule(context, item),
-      cards: () => definition.cards(context, item),
-    }));
-  });
-}
-
-function artistDrawHistoryKey(context, pool) {
-  return [artistDrawStoragePrefix, context.sourceId, pool.ruleKey]
-    .map((part) => encodeURIComponent(part)).join(':');
-}
-
-function readArtistDrawHistory(context, pool) {
-  try {
-    const values = JSON.parse(localStorage.getItem(artistDrawHistoryKey(context, pool)) || '[]');
-    return new Set(Array.isArray(values) ? values.map((value) => searchText(value)).filter(Boolean) : []);
-  } catch {
-    return new Set();
-  }
-}
-
-function writeArtistDrawHistory(context, pool, seen) {
-  try {
-    localStorage.setItem(artistDrawHistoryKey(context, pool), JSON.stringify([...seen]));
-  } catch { /* The current session still de-duplicates when storage is unavailable. */ }
-}
-
-function uniqueArtistDrawCards(cards) {
-  const unique = new Map();
-  for (const card of cards) {
-    const tag = artistDrawTag(card);
-    if (!tag) continue;
-    const current = unique.get(tag);
-    if (!current || (card.photos?.length || 0) > (current.photos?.length || 0)) unique.set(tag, card);
-  }
-  return [...unique.values()];
-}
-
-function sampleArtistDrawCards(cards, count) {
-  const size = Math.min(count, cards.length);
-  for (let index = 0; index < size; index++) {
-    const other = index + Math.floor(Math.random() * (cards.length - index));
-    [cards[index], cards[other]] = [cards[other], cards[index]];
-  }
-  return cards.slice(0, size);
-}
-
-function shuffleArtists(cards, seed) {
-  let random = seed;
-  for (let i = cards.length - 1; i > 0; i--) {
-    random = (Math.imul(random, 1664525) + 1013904223) >>> 0;
-    const other = random % (i + 1);
-    [cards[i], cards[other]] = [cards[other], cards[i]];
-  }
-}
-
 function isRemote() {
   return state.mode === 'online' && (state.section === 'knowledge' ? state.knowledgeTab === 'images'
     : state.section === 'artist' ? state.artistSource === 'nax' : true);
@@ -443,7 +291,7 @@ function normalizeGalleryPacks(value) {
 
 function readCachedGalleryPacks() {
   try {
-    const saved = JSON.parse(localStorage.getItem(galleryPacksStorageKey) || 'null');
+    const saved = readJsonStorage(galleryPacksStorageKey);
     return normalizeGalleryPacks(saved).packs;
   } catch {
     return null;
@@ -462,10 +310,8 @@ function loadGalleryPacks() {
       const packs = normalizeGalleryPacks(await response.json()).packs;
       const changed = JSON.stringify(packs) !== previous;
       state.galleryPacks = packs;
-      try {
-        localStorage.setItem(galleryPacksStorageKey,
-          JSON.stringify({ format: 'nai-pocket-gallery-index', version: 1, packs }));
-      } catch { /* The built-in entry remains available. */ }
+      writeJsonStorage(galleryPacksStorageKey,
+        { format: 'nai-pocket-gallery-index', version: 1, packs });
       if (changed && state.mode === 'online') render();
       return true;
     })
@@ -942,33 +788,6 @@ async function loadPersonal() {
   renderList();
 }
 
-async function copy(value) {
-  const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
-  if (!text) return;
-  const revision = screenRevision;
-  try {
-    if (window.Pocket) {
-      if (await native('copy', text, 4500) !== true) throw new Error('系统未确认复制。');
-    } else {
-      await navigator.clipboard.writeText(text);
-    }
-    toast('已复制');
-  } catch {
-    if (revision !== screenRevision) return;
-    if (!screen.open) openScreen('手动复制');
-    body.querySelector('.copy-fallback')?.remove();
-    const fallback = node('section', 'copy-fallback');
-    const field = node('textarea', '');
-    field.readOnly = true;
-    field.value = text;
-    field.setAttribute('aria-label', '待复制内容');
-    fallback.append(node('p', '', '系统未能复制。可长按文本，选择要复制的内容。'), field);
-    body.append(fallback);
-    field.focus();
-    field.select();
-    fallback.scrollIntoView({ block: 'nearest' });
-  }
-}
 
 function openLink(url) {
   if (window.Pocket) native('openLink', url).catch((error) => toast(error.message));
@@ -1032,6 +851,82 @@ function tagGalleryKindInfo(value) {
     raw,
     section: '',
   };
+}
+
+function isDanbooruTagFavorite(card) {
+  return Boolean(card?.from?.startsWith('danbooru-tag:'));
+}
+
+function tagGalleryFavoriteCard(tag) {
+  const original = String(tag?.name ?? '').trim();
+  const kind = tagGalleryKindInfo(tag?.kind);
+  if (!original || !kind.section) return null;
+  const card = {
+    id: `danbooru-tag:${kind.key}:${original}`,
+    title: original,
+    prompt: original,
+    section: kind.section,
+    kind: kind.section === 'knowledge' ? 'general' : undefined,
+    model: '通用',
+    source: 'Danbooru',
+    sourceUrl: 'https://danbooru.donmai.us/wiki_pages/' + encodeURIComponent(PocketSources.tagGalleryTag(original)),
+    photos: [],
+  };
+  if (kind.key === 'copyright') card.work = original;
+  return card;
+}
+
+function findTagGallerySavedCard(card, cards = state.personal) {
+  const key = artistTagKey(card.prompt);
+  return cards.find((saved) => saved.section === card.section
+    && (saved.from === card.id
+      || ((saved.model || '通用') === '通用' && !saved.outfit
+        && artistTagKey(String(saved.prompt || '').replace(/^artist\s*:\s*/i, '')) === key)));
+}
+
+function tagGalleryFavoriteSaved(tag) {
+  const card = tagGalleryFavoriteCard(tag);
+  return Boolean(card && findTagGallerySavedCard(card));
+}
+
+async function favoriteTagGalleryTag(tag, back = null) {
+  const card = tagGalleryFavoriteCard(tag);
+  if (!card) return;
+  const revision = screenRevision;
+  const stored = await useCards('readonly', (store) => store.getAll());
+  const existing = findTagGallerySavedCard(card, stored);
+  if (existing) {
+    if (revision === screenRevision) showEditor(existing, back, card.prompt);
+    return;
+  }
+  const result = await saveFavorite(card);
+  if (revision === screenRevision) {
+    toast(result.existing ? '此标签已在「我的词库」' : `已收藏到「${sections[card.section].label}」`);
+  }
+}
+
+function tagGalleryFavoriteButton(tag, back) {
+  const control = button('', 'soft compact', async () => {
+    const scroll = body.scrollTop;
+    control.disabled = true;
+    control.setAttribute('aria-busy', 'true');
+    try {
+      await favoriteTagGalleryTag(tag, () => back(scroll));
+    } catch {
+      if (control.isConnected) toast('收藏失败，请稍后重试。');
+    } finally {
+      if (control.isConnected) refresh();
+    }
+  });
+  function refresh() {
+    const label = tagGalleryFavoriteSaved(tag) ? '编辑收藏' : '收藏';
+    control.textContent = label;
+    control.setAttribute('aria-label', `${label} ${tag.name}`);
+    control.disabled = false;
+    control.removeAttribute('aria-busy');
+  }
+  refresh();
+  return control;
 }
 
 function tagGalleryReferenceTags(value, kind = 'general') {
@@ -1134,7 +1029,7 @@ function appendTagGalleryActions(target, card, back = null, photoIndex = 0) {
   if (!['artist', 'character', 'knowledge'].includes(card.section)) return;
   const value = card.section === 'artist' ? artistChainCardTag(card) || artistCardTag(card)
     : card.section === 'knowledge' ? card.prompt || card.title
-      : card.local ? card.title : card.prompt || card.title;
+      : card.local && !isDanbooruTagFavorite(card) ? card.title : card.prompt || card.title;
   const references = card.section === 'knowledge' ? tagGalleryReferenceTags(value) : [];
   const tag = card.section === 'knowledge'
     ? references.map((item) => PocketSources.tagGalleryTag(item.name)).filter(Boolean).join(' ')
@@ -1535,7 +1430,9 @@ function renderArtistDiscovery() {
   panel.open = wasOpen ?? activeFilters.length > 0;
   const quick = node('section', 'artist-quick-actions');
   const quickPrimary = node('div', 'artist-quick-primary');
-  quickPrimary.append(button('画风串', 'primary compact', () => openArtistChainWorkbench()));
+  const chainButton = button('画风串', 'primary compact artist-chain-quick-open', () => window.PocketApp.chain.openArtistChainWorkbench());
+  chainButton.setAttribute('aria-label', '画风串');
+  quickPrimary.append(chainButton);
   quickPrimary.append(button('其他图包', 'soft compact', showPackSources));
   quickPrimary.append(button(state.galleryFocus ? '退出图墙' : '全屏看图', 'soft compact', () => {
     const focus = !state.galleryFocus;
@@ -1543,8 +1440,10 @@ function renderArtistDiscovery() {
     setGalleryLayout(focus);
     render();
   }));
-  quick.append(quickPrimary);
+  const quickCopy = button('', 'soft compact artist-chain-quick-copy', window.PocketApp.chain.copyCurrentArtistChain);
+  quick.append(quickPrimary, quickCopy);
   tools.append(quick);
+  window.PocketApp.chain.refreshArtistChainShortcuts();
 
   const summary = node('summary', 'artist-filter-summary');
   summary.append(node('span', '', '筛选与更多'),
@@ -1846,7 +1745,7 @@ function render() {
   for (const [value, label] of [['grid', artistBrowser ? '图片' : '双列看图'], ['list', '图文列表'], ['compact', '紧凑文字']]) {
     viewOptions.append(chip(label, views[state.section] === value, () => {
       views[state.section] = value;
-      try { localStorage.setItem('pocket-views', JSON.stringify(views)); } catch { /* In-memory choice still works. */ }
+      writeJsonStorage('pocket-views', views);
       render();
     }));
   }
@@ -1897,7 +1796,9 @@ function row(card, options = {}) {
   const grid = options.grid ?? view === 'grid';
   const item = node('article', grid ? 'card' : 'row');
   const artistPicture = grid && card.section === 'artist' && !options.actions;
+  const artistTicket = !grid && card.section === 'artist' && !options.actions;
   if (artistPicture) item.classList.add('artist-picture-card');
+  if (artistTicket) item.classList.add('artist-ticket-row');
   const hit = button(card.title, grid ? 'card-main' : 'row-main', options.open || (() => showCard(card)));
   hit.setAttribute('aria-label', card.title);
   const mark = node('span', 'row-mark');
@@ -1914,9 +1815,18 @@ function row(card, options = {}) {
   } else {
     text.append(node('span', 'row-title', card.title), node('span', 'row-caption', caption.filter(Boolean).join(' · ')));
   }
+  if (isDanbooruTagFavorite(card)) {
+    item.classList.add('danbooru-tag-favorite');
+    tagDictionaryAppend(text, card.prompt);
+  }
   if (card.section === 'knowledge' && card.note && view !== 'compact') text.append(node('span', 'row-note', card.note));
-  hit.replaceChildren(view === 'compact' || (view === 'list' && !card.photos.length)
-    ? mark : thumbnail(card, grid, options.eager, artistPicture), text);
+  const media = view === 'compact' || (view === 'list' && !card.photos.length)
+    ? mark : thumbnail(card, grid, options.eager, artistPicture);
+  if (artistTicket) {
+    const stub = node('span', 'artist-ticket-stub');
+    stub.setAttribute('aria-hidden', 'true');
+    hit.replaceChildren(stub, media, text);
+  } else hit.replaceChildren(media, text);
   item.append(hit);
   if (options.actions) item.append(options.actions);
   else {
@@ -1934,6 +1844,15 @@ function row(card, options = {}) {
       if (artistPicture) item.classList.add('artist-picture-copy');
       item.append(controls);
     }
+  }
+  if ((artistPicture || artistTicket) && card.prompt && !state.galleryFocus) {
+    const mix = button('+ 画风串', 'soft compact artist-ticket-mix', () => {
+      window.PocketApp.chain.openArtistChainWorkbench({
+        defaultModel: artistModelSeries(card.model) || null, initialArtists: [card],
+      });
+    });
+    mix.setAttribute('aria-label', `将 ${card.title} 加入画风串`);
+    item.append(mix);
   }
   return item;
 }
@@ -2087,124 +2006,6 @@ function renderList() {
   }
 }
 
-function artistDrawPool(session) {
-  return session.pools.find((pool) => pool.key === session.poolKey) || session.pools[0];
-}
-
-function drawNextArtistBatch(session) {
-  const pool = artistDrawPool(session);
-  const unique = uniqueArtistDrawCards(pool.cards());
-  const seen = new Set([...readArtistDrawHistory(session.context, pool), ...session.seen]);
-  const available = unique.filter((card) => !seen.has(artistDrawTag(card)));
-  const batch = sampleArtistDrawCards(available, artistDrawBatchSize);
-  for (const card of batch) seen.add(artistDrawTag(card));
-  writeArtistDrawHistory(session.context, pool, seen);
-  session.seen = seen;
-  session.batch = batch;
-  session.totalUnique = unique.length;
-  session.remaining = available.length - batch.length;
-  session.exhausted = available.length === 0 || batch.length >= available.length;
-  session.hasDrawn = true;
-}
-
-function artistDrawCard(card) {
-  const controls = node('div', 'card-actions');
-  controls.append(favoriteControl(card));
-  return row(card, {
-    grid: true,
-    view: 'grid',
-    eager: true,
-    trailing: false,
-    open: () => showCard(card, 0, renderArtistDrawScreen),
-    actions: controls,
-  });
-}
-
-function renderArtistDrawScreen() {
-  const session = artistDrawSession;
-  if (!session) return;
-  openScreen('随机发现画师');
-  const pool = artistDrawPool(session);
-  body.append(node('p', 'resource-note',
-    `${session.context.sourceLabel} · 每批最多 ${artistDrawBatchSize} 位。同一个池会跳过已展示的画师。`));
-  const pools = options(session.pools.map(({ key, label }) => [key, label]), session.poolKey);
-  pools.addEventListener('change', () => {
-    session.poolKey = pools.value;
-    session.seen = new Set();
-    drawNextArtistBatch(session);
-    renderArtistDrawScreen();
-  });
-  body.append(field('画师池', pools));
-  if (session.batch.length) {
-    const gallery = node('div', 'gallery');
-    gallery.append(...session.batch.map(artistDrawCard));
-    body.append(gallery);
-    if (session.exhausted) {
-      body.append(node('p', 'resource-note', '这是本池最后一批。可以重置本池记录后再浏览。'));
-    }
-  } else {
-    const panel = node('section', 'empty');
-    const mark = node('div', 'row-mark');
-    mark.append(icon('artist'));
-    panel.append(mark,
-      node('h2', '', session.totalUnique ? '这个池已经看完' : '这个池没有可浏览的画师'),
-      node('p', '', session.totalUnique
-        ? `本池的 ${number.format(session.totalUnique)} 位画师都已出现过。重置只清除「${pool.label}」的历史，不会删除收藏。`
-        : '换一个画师池，或回到画师列表调整筛选。'));
-    body.append(panel);
-  }
-  if (session.totalUnique && session.exhausted) {
-    actions.append(button('重置本池浏览记录', 'soft', resetArtistDrawPool));
-  } else if (session.remaining > 0) {
-    actions.append(button(`再看 ${Math.min(artistDrawBatchSize, session.remaining)} 位`, 'primary', () => {
-      drawNextArtistBatch(session);
-      renderArtistDrawScreen();
-    }));
-  }
-}
-
-function resetArtistDrawPool() {
-  const session = artistDrawSession;
-  if (!session) return;
-  const pool = artistDrawPool(session);
-  if (!confirm(`重置「${pool.label}」中已出现的画师记录，并重新抽取？收藏不会被删除。`)) return;
-  try {
-    localStorage.removeItem(artistDrawHistoryKey(session.context, pool));
-  } catch { /* A fresh in-memory session can still continue. */ }
-  session.seen = new Set();
-  session.batch = [];
-  session.hasDrawn = false;
-  drawNextArtistBatch(session);
-  renderArtistDrawScreen();
-}
-
-function openArtistDrawScreen() {
-  const context = artistDrawContext();
-  if (!context) {
-    toast('当前画师来源尚未加载完成。');
-    return;
-  }
-  const pools = artistDrawPoolOptions(context);
-  const previous = artistDrawSession;
-  const sameContext = previous?.context.key === context.key;
-  if (sameContext) {
-    previous.context = context;
-    previous.pools = pools;
-    if (!pools.some((pool) => pool.key === previous.poolKey)) previous.poolKey = pools[0].key;
-    if (!previous.hasDrawn) drawNextArtistBatch(previous);
-  } else {
-    const poolKey = context.filterKey.keywords.length || context.filterKey.group !== 'all'
-      || context.filterKey.postBand !== 'all' ? 'filtered' : 'all';
-    artistDrawSession = {
-      context, pools, poolKey,
-      seen: new Set(), batch: [],
-      totalUnique: 0, remaining: 0, exhausted: false, hasDrawn: false,
-    };
-    drawNextArtistBatch(artistDrawSession);
-  }
-  renderArtistDrawScreen();
-}
-
 let screenBack = null;
 let screenRevision = 0;
 
@@ -2212,6 +2013,8 @@ function openScreen(title, back = null, wide = false) {
   screenRevision++;
   screenBack = back;
   document.querySelector('.screen-inner')?.classList.remove('artist-chain-open');
+  screen.classList.remove('artist-chain-screen');
+  screen.classList.remove('theme-open');
   screen.classList.toggle('detail-wide', wide);
   byId('screen-title').textContent = title;
   body.replaceChildren();
@@ -2226,11 +2029,33 @@ function closeScreen() {
   screen.close();
   body.replaceChildren();
   actions.replaceChildren();
+  window.PocketApp.chain.refreshArtistChainShortcuts();
 }
 
 function goBack() {
   if (screenBack) screenBack();
   else closeScreen();
+}
+
+function showThemePicker() {
+  openScreen('选择配色');
+  screen.classList.add('theme-open');
+  const palette = node('div', 'theme-palette');
+  palette.setAttribute('role', 'group');
+  palette.setAttribute('aria-label', '界面配色');
+  for (const [theme, { name }] of themeChoices) {
+    const choice = button(name, 'theme-choice', () => {
+      applyTheme(theme, { persist: true });
+      for (const item of palette.children) item.setAttribute('aria-pressed', String(item === choice));
+    });
+    choice.setAttribute('aria-pressed', String(document.documentElement.dataset.theme === theme));
+    const swatch = node('span', 'theme-swatch');
+    swatch.dataset.palette = theme;
+    swatch.setAttribute('aria-hidden', 'true');
+    choice.prepend(swatch);
+    palette.append(choice);
+  }
+  body.append(palette);
 }
 
 function appendCopyFact(list, label, value, missing, includeEmpty = false) {
@@ -2460,10 +2285,11 @@ async function choosePhoto() {
   });
 }
 
-function showEditor(previous) {
+function showEditor(previous, back = null, originalTag = '') {
   const section = previous?.section ?? state.section;
   const existing = Boolean(previous?.local);
-  openScreen(existing ? '编辑条目' : '新增' + sections[section].label);
+  openScreen(existing ? '编辑条目' : '新增' + sections[section].label, back);
+  const revision = screenRevision;
   const title = textInput('input', previous?.title, '可留空，默认取提示词的第一行', 120);
   const prompt = textInput('textarea', previous?.prompt, '输入标签、短语或整段提示词', 16000);
   const note = textInput('textarea', previous?.note, '例如适用镜头、使用心得', 8000);
@@ -2489,6 +2315,10 @@ function showEditor(previous) {
   updateAttachments();
   attachments.append(photoStatus, photoButton, remove);
   form.append(field('名称', title), field(sections[section].type, prompt));
+  const dictionaryTag = originalTag || (isDanbooruTagFavorite(previous) ? previous.prompt : '');
+  if (dictionaryTag) {
+    tagDictionaryAppend(form, dictionaryTag, () => revision === screenRevision);
+  }
   if (section === 'knowledge') form.append(field('知识分类', kind));
   const characterInputs = {};
   if (section === 'character') {
@@ -2528,6 +2358,12 @@ function showEditor(previous) {
     if (duplicate) { save.disabled = false; toast('该模型下已有相同标签，请编辑已有条目。'); return; }
     try {
       await useCards('readwrite', (store) => store.put(card));
+      if (back) {
+        await loadPersonal();
+        if (revision === screenRevision) back();
+        toast('已保存到我的词库');
+        return;
+      }
       closeScreen();
       state.section = section;
       state.mode = 'personal';
@@ -2547,8 +2383,9 @@ function showEditor(previous) {
       if (!confirm('删除这个本机条目？')) return;
       try {
         await useCards('readwrite', (store) => store.delete(previous.id));
-        closeScreen();
+        if (!back) closeScreen();
         await loadPersonal();
+        if (back && revision === screenRevision) back();
         toast('已删除');
       } catch { toast('删除失败，请重试。'); }
     }));
@@ -2673,1955 +2510,6 @@ async function importBackup() {
     };
     actions.append(button('合并导入', 'primary', () => restore(false)), button('替换恢复', 'subtle danger', () => restore(true)));
   } catch (error) { toast(error instanceof SyntaxError ? '文件不是有效的 JSON 备份。' : error.message || '无法读取备份。'); }
-}
-
-async function readImagePrompts() {
-  if (!window.Pocket) { toast('请在安卓 App 中选择原图。'); return; }
-  const revision = screenRevision;
-  try {
-    const data = await native('readImagePrompts');
-    if (!data || revision !== screenRevision) return;
-    showPromptImport(data);
-  } catch (error) { toast(error.message || '读取原图失败。'); }
-}
-
-function checkOption(label, checked, change) {
-  const wrapper = node('label', 'option-check');
-  const input = node('input');
-  input.type = 'checkbox';
-  input.checked = checked;
-  input.addEventListener('change', () => change(input.checked));
-  wrapper.append(input, node('span', '', label));
-  return wrapper;
-}
-
-function selectedGeneration(data, selected) {
-  const actual = selected.actual;
-  const prompt = selected.positive ? (actual && data.actualPrompt || data.prompt || '') : '';
-  const negativePrompt = selected.negative ? (actual && data.actualNegativePrompt || data.negativePrompt || '') : '';
-  const characters = selected.characters ? (actual && data.actualCharacters?.length ? data.actualCharacters : data.characters || []) : [];
-  const negativeCharacters = selected.characters ? (actual && data.actualNegativeCharacters?.length ? data.actualNegativeCharacters : data.negativeCharacters || []) : [];
-  const parameters = selected.settings ? { ...data.parameters } : {};
-  for (const key of ['prompt', 'uc', 'negative_prompt', 'v4_prompt', 'v4_negative_prompt', 'actual_prompts', 'Comment', 'seed']) delete parameters[key];
-  if (selected.seed && data.parameters?.seed !== undefined) parameters.seed = data.parameters.seed;
-  const withCaptions = (original, base, rows) => original && selected.characters
-    ? { ...original, caption: { base_caption: base, char_captions: rows } } : undefined;
-  return {
-    prompt, negativePrompt, characters, negativeCharacters, parameters,
-    model: selected.settings ? data.model : undefined,
-    promptMode: actual ? 'actual' : 'original',
-    v4Prompt: withCaptions(data.v4Prompt, prompt, characters),
-    v4NegativePrompt: withCaptions(data.v4NegativePrompt, negativePrompt, negativeCharacters),
-  };
-}
-
-const verifiedModelHashes = new Map([
-  ['0ADF9AB7', 'V5 Full'],
-  ['657484A5', 'V5 Full'],
-  ['70AB5786', 'V5 Full Medium'],
-  ['93F4BD30', 'V5 Full Medium'],
-  ['DB276663', 'V5 精选'],
-  ['4BDE2A90', 'V4.5 Full'],
-  ['1229B44F', 'V4.5 Full'],
-  ['B9F340FD', 'V4.5 Full'],
-  ['F3D95188', 'V4.5 Full'],
-  ['C02D4F98', 'V4.5 精选'],
-]);
-
-function novelAiModelLabel(value, hash = '') {
-  const raw = typeof value === 'string' ? value.trim() : '';
-  const api = /^nai-diffusion-(4-5|[345])(?:-(full|curated)(?:-(small|medium))?)?(?:-(inpainting))?$/i.exec(raw);
-  const name = /^(?:novelai diffusion\s+(?:anime\s+)?)?v(4\.5|[345])(?=$|[\s(（-])/i.exec(raw);
-  const version = api ? `V${api[1].replace('-', '.')}` : name ? `V${name[1]}` : '';
-  const variant = api?.[2] || (name && /\b(full|curated)\b|精选/i.exec(raw)?.[0]);
-  if (variant) {
-    const base = variant.toLowerCase() === 'full' ? 'Full' : '精选';
-    const size = api?.[3] || /\b(small|medium)\b/i.exec(raw)?.[0];
-    const inpainting = api?.[4] || /\binpainting\b/i.test(raw);
-    return `${version} ${base}${size ? ' ' + size[0].toUpperCase() + size.slice(1).toLowerCase() : ''}${inpainting ? ' · 局部重绘' : ''}`;
-  }
-  const suffix = /(?:^|\s)([a-f0-9]{8})$/i.exec(raw)?.[1];
-  const known = verifiedModelHashes.get(String(suffix || hash).toUpperCase());
-  if (known && (!version || known.startsWith(`${version} `))) return known;
-  return version ? `${version}（型号未核实）` : '未标注';
-}
-
-const parameterLabels = {
-  model: '模型', sampler: '采样器', steps: '步数', seed: '种子',
-  width: '宽度', height: '高度', scale: '提示词引导（CFG）', cfg_rescale: '引导重缩放',
-  noise_schedule: '噪声计划', sm: 'SMEA', sm_dyn: 'SMEA DYN',
-  qualityToggle: '质量词开关', ucPreset: '负向预设',
-  dynamic_thresholding: '动态阈值', strength: '强度', noise: '噪声',
-};
-
-function renderCharacterPrompts(container, characters, negatives) {
-  if (!Array.isArray(characters)) characters = [];
-  if (!Array.isArray(negatives)) negatives = [];
-  const caption = (entry) => typeof entry === 'string' ? entry : entry?.char_caption || '';
-  for (let i = 0; i < Math.max(characters.length, negatives.length); i++) {
-    const title = `角色 ${i + 1}`;
-    const positive = characters[i];
-    const negative = negatives[i];
-    const card = node('section', 'metadata-disclosure');
-    const group = node('details', 'character-prompts');
-    const fields = { prompt: caption(positive), negativePrompt: caption(negative) };
-    if (positive?.centers?.length) fields.centers = positive.centers;
-    if (negative?.centers?.length) fields.negativeCenters = negative.centers;
-    const body = node('div', 'character-prompts-body');
-    group.append(node('summary', '', title));
-    addCopyablePrompt(body, title + '正向', fields.prompt);
-    addCopyablePrompt(body, title + '负向', fields.negativePrompt);
-    const positions = node('dl', 'metadata-facts');
-    appendCopyFact(positions, '正向位置', fields.centers);
-    appendCopyFact(positions, '负向位置', fields.negativeCenters);
-    if (positions.childElementCount) body.append(positions);
-    group.append(body);
-    card.append(group, button('复制这位角色', 'soft compact metadata-disclosure-copy', () => copy(fields)));
-    container.append(card);
-  }
-}
-
-function addCopyablePrompt(container, label, value) {
-  if (!value) return;
-  const section = node('div', 'copyable-prompt');
-  const control = button('复制' + label, 'soft compact', () => copy(value));
-  const heading = node('div', 'prompt-card-heading');
-  heading.append(node('h3', '', label), control);
-  section.append(heading, node('div', 'prompt', value));
-  container.append(section);
-}
-
-function artistTagKey(value) {
-  return unescapeTagPunctuation(String(value ?? '').normalize('NFKC'))
-    .replace(/[_\s]+/g, ' ').replace(/ *([()]) */g, '$1').trim().toLocaleLowerCase();
-}
-
-function unescapeTagPunctuation(value) {
-  return value.replace(/\\([\\(),_])/g, '$1');
-}
-
-let artistChainDraftCache = null;
-let artistChainStorageMessage = '';
-let artistChainStorageUnavailable = false;
-
-function emptyArtistChainDraft() {
-  const draft = {
-    format: 'nai-pocket-artist-chain',
-    version: 2,
-    selectedModel: 'V5',
-    drafts: { V5: [], 'V4.5': [] },
-    copies: { V5: [], 'V4.5': [] },
-    activeCopyIds: { V5: '', 'V4.5': '' },
-    compareCopyIds: { V5: null, 'V4.5': null },
-    nextCopyId: 1,
-  };
-  for (const model of artistChainModels) {
-    const copy = { id: `default-${model}`, name: '默认草稿', items: [] };
-    draft.copies[model].push(copy);
-    draft.drafts[model] = copy.items;
-    draft.activeCopyIds[model] = copy.id;
-  }
-  return draft;
-}
-
-function normalizeArtistChainCopyName(value) {
-  if (typeof value !== 'string') return { error: '请输入副本名称。' };
-  const name = value.normalize('NFKC').trim().replace(/\s+/g, ' ');
-  if (!name) return { error: '请输入副本名称。' };
-  if (name.length > artistChainCopyNameMaxLength) {
-    return { error: `副本名称最多 ${artistChainCopyNameMaxLength} 个字符。` };
-  }
-  return { name };
-}
-
-function normalizeArtistChainItems(stored) {
-  if (!Array.isArray(stored) || stored.length > artistChainCapacity) {
-    throw new Error(`每个模型的画风串最多保存 ${artistChainCapacity} 位画师。`);
-  }
-  const items = [];
-  const keys = new Set();
-  for (const entry of stored) {
-    if (!entry || typeof entry !== 'object' || Array.isArray(entry)
-        || typeof entry.tag !== 'string' || typeof entry.weight !== 'number'
-        || (entry.disabled !== undefined && typeof entry.disabled !== 'boolean')) {
-      throw new Error('画风串草稿条目不正确。');
-    }
-    const normalized = normalizeArtistChainTag(entry.tag, { escapeCommas: true });
-    if (normalized.error
-        || !Number.isFinite(entry.weight) || entry.weight < 0 || entry.weight > 3
-        || Math.abs(entry.weight * 10 - Math.round(entry.weight * 10)) > 1e-9
-        || keys.has(normalized.key)) {
-      throw new Error('画风串草稿含无效的标签、倍率或重复项。');
-    }
-    keys.add(normalized.key);
-    items.push({
-      tag: normalized.tag,
-      key: normalized.key,
-      weight: entry.weight,
-      disabled: entry.disabled === true,
-    });
-  }
-  return items;
-}
-
-function normalizeLegacyArtistChainDraft(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)
-      || value.format !== 'nai-pocket-artist-chain' || value.version !== 1
-      || !value.drafts || typeof value.drafts !== 'object' || Array.isArray(value.drafts)) {
-    throw new Error('画风串草稿格式不正确。');
-  }
-  const result = {
-    selectedModel: artistChainModels.includes(value.selectedModel) ? value.selectedModel : 'V5',
-    drafts: {},
-  };
-  for (const model of artistChainModels) {
-    result.drafts[model] = normalizeArtistChainItems(value.drafts[model]);
-  }
-  return result;
-}
-
-function upgradeLegacyArtistChainDraft(value) {
-  const legacy = normalizeLegacyArtistChainDraft(value);
-  const result = emptyArtistChainDraft();
-  result.selectedModel = legacy.selectedModel;
-  for (const model of artistChainModels) {
-    const copy = result.copies[model][0];
-    copy.items = legacy.drafts[model];
-    result.drafts[model] = copy.items;
-  }
-  return result;
-}
-
-function normalizeArtistChainDraft(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)
-      || value.format !== 'nai-pocket-artist-chain' || value.version !== 2
-      || !value.copies || typeof value.copies !== 'object' || Array.isArray(value.copies)) {
-    throw new Error('画风串草稿格式不正确。');
-  }
-  const result = emptyArtistChainDraft();
-  if (artistChainModels.includes(value.selectedModel)) result.selectedModel = value.selectedModel;
-  const nextCopyId = Number(value.nextCopyId);
-  if (Number.isSafeInteger(nextCopyId) && nextCopyId > 0) result.nextCopyId = nextCopyId;
-
-  for (const model of artistChainModels) {
-    const storedCopies = value.copies[model];
-    if (!Array.isArray(storedCopies) || !storedCopies.length
-        || storedCopies.length > artistChainCopiesPerModel) {
-      throw new Error(`每个模型需要保存 1–${artistChainCopiesPerModel} 份画风串草稿。`);
-    }
-    const copies = [];
-    const ids = new Set();
-    const names = new Set();
-    for (const storedCopy of storedCopies) {
-      if (!storedCopy || typeof storedCopy !== 'object' || Array.isArray(storedCopy)
-          || typeof storedCopy.id !== 'string' || !storedCopy.id || storedCopy.id.length > 80) {
-        throw new Error('画风串副本标识不正确。');
-      }
-      const normalizedName = normalizeArtistChainCopyName(storedCopy.name);
-      if (normalizedName.error || ids.has(storedCopy.id) || names.has(normalizedName.name)) {
-        throw new Error('画风串副本名称或标识不正确。');
-      }
-      ids.add(storedCopy.id);
-      names.add(normalizedName.name);
-      copies.push({
-        id: storedCopy.id,
-        name: normalizedName.name,
-        items: normalizeArtistChainItems(storedCopy.items),
-      });
-    }
-    const activeId = value.activeCopyIds?.[model];
-    const active = copies.find((copy) => copy.id === activeId) || copies[0];
-    const compareId = value.compareCopyIds?.[model];
-    const compare = copies.find((copy) => copy.id === compareId && copy.id !== active.id);
-    result.copies[model] = copies;
-    result.activeCopyIds[model] = active.id;
-    result.drafts[model] = active.items;
-    result.compareCopyIds[model] = compare?.id || null;
-  }
-  return result;
-}
-
-function loadArtistChainDraft({ fresh = false } = {}) {
-  if (artistChainDraftCache && !fresh) return artistChainDraftCache;
-  artistChainStorageUnavailable = false;
-  try {
-    const raw = localStorage.getItem(artistChainStorageKey);
-    if (raw) {
-      artistChainDraftCache = normalizeArtistChainDraft(JSON.parse(raw));
-      artistChainStorageMessage = '已从本机恢复画风串草稿与副本。';
-    } else {
-      const legacyRaw = localStorage.getItem(artistChainLegacyStorageKey);
-      if (legacyRaw) {
-        artistChainDraftCache = upgradeLegacyArtistChainDraft(JSON.parse(legacyRaw));
-        if (persistArtistChainDraft(artistChainDraftCache)) {
-          artistChainStorageMessage = '已恢复旧版草稿。';
-        }
-      } else {
-        artistChainDraftCache = emptyArtistChainDraft();
-        artistChainStorageMessage = '草稿会自动保存在本机。';
-      }
-    }
-  } catch (error) {
-    artistChainDraftCache = emptyArtistChainDraft();
-    if (error instanceof SyntaxError || error?.message?.includes('草稿')) {
-      artistChainStorageMessage = '本机画风串草稿格式异常，已使用空草稿。';
-    } else {
-      artistChainStorageUnavailable = true;
-      artistChainStorageMessage = '本机存储不可用；草稿仅保留在当前会话。';
-    }
-  }
-  return artistChainDraftCache;
-}
-
-function persistArtistChainDraft(draft) {
-  const value = {
-    format: draft.format,
-    version: draft.version,
-    selectedModel: draft.selectedModel,
-    drafts: Object.fromEntries(artistChainModels.map((model) => [model, draft.drafts[model].map((item) => ({
-      tag: item.tag,
-      weight: item.weight,
-      ...(item.disabled ? { disabled: true } : {}),
-    }))])),
-    copies: Object.fromEntries(artistChainModels.map((model) => [model, draft.copies[model].map((copy) => ({
-      id: copy.id,
-      name: copy.name,
-      items: copy.items.map((item) => ({
-        tag: item.tag,
-        weight: item.weight,
-        ...(item.disabled ? { disabled: true } : {}),
-      })),
-    }))])),
-    activeCopyIds: { ...draft.activeCopyIds },
-    compareCopyIds: { ...draft.compareCopyIds },
-    nextCopyId: draft.nextCopyId,
-  };
-  try {
-    localStorage.setItem(artistChainStorageKey, JSON.stringify(value));
-    artistChainStorageUnavailable = false;
-    artistChainStorageMessage = '草稿已自动保存到本机。';
-    return true;
-  } catch {
-    artistChainStorageUnavailable = true;
-    artistChainStorageMessage = '本机草稿写入失败；当前会话仍可继续使用。';
-    return false;
-  }
-}
-
-function inspectArtistChainTag(value) {
-  const stack = [];
-  const pairs = { '(': ')', '[': ']', '{': '}' };
-  for (let index = 0; index < value.length; index++) {
-    const character = value[index];
-    if (character === '\\') {
-      index++;
-      continue;
-    }
-    if ((character === '"' || character === "'")
-        && (index === 0 || /[\s([{:]/.test(value[index - 1]))) {
-      const end = promptQuoteEnd(value, index);
-      if (end !== -1) {
-        index = end;
-        continue;
-      }
-    }
-    if (pairs[character]) {
-      stack.push(pairs[character]);
-      continue;
-    }
-    if (character === ')' || character === ']' || character === '}') {
-      if (stack.pop() !== character) return '括号未正确配对。';
-      continue;
-    }
-    if (character === ',' && !stack.length) return '一次只能加入一位画师，多个顶层标签请分开添加。';
-  }
-  if (stack.length) return '括号未正确配对。';
-  return '';
-}
-
-function normalizeArtistChainTag(value, { escapeCommas = false } = {}) {
-  let tag = String(value ?? '').normalize('NFKC').trim();
-  if (!tag) return { error: '请输入一位画师的完整标签。' };
-  tag = tag.replace(/^artist\s*:\s*/i, '').trim();
-  if ((tag[0] === '"' || tag[0] === "'") && promptQuoteEnd(tag, 0) === tag.length - 1) {
-    tag = tag.slice(1, -1).trim();
-  }
-  if (!tag) return { error: '请补全 artist: 后面的画师标签。' };
-  if (tag.length > 512 || /[\u0000-\u001f\u007f]/.test(tag)) {
-    return { error: '画师标签过长或含有控制字符。' };
-  }
-  if (tag.includes('::')) return { error: '画风串不支持 ::，请只输入单个画师标签。' };
-  if (tag.includes('|')) return { error: '画风串不支持 |，请只输入单个画师标签。' };
-  if (/[\[\]{}]/.test(tag)) return { error: '画师标签不能包含 [] 或 {}。' };
-  if (tag.endsWith('\\')) return { error: '画师标签末尾不能是孤立的反斜杠。' };
-  if (escapeCommas) tag = artistChainEscapeCommas(tag);
-  const structureError = inspectArtistChainTag(tag);
-  if (structureError) return { error: structureError };
-  const key = artistTagKey(tag);
-  if (!key) return { error: '画师标签需要包含可识别的文字。' };
-  return { tag, key };
-}
-
-function validateArtistChainInput(value, catalog, targetModel) {
-  const normalized = normalizeArtistChainTag(value);
-  if (normalized.error) return normalized;
-  if (/(?:^|\s):\s*[+-]?(?:\d+(?:\.\d+)?|\.\d+)\s*$/.test(normalized.tag)) {
-    return { error: '请只用下方的倍率控件设置权重；未确认的权重块不能加入。' };
-  }
-  if (/:([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*$/.test(normalized.tag)) {
-    return { error: '请只用下方的倍率控件设置权重；未确认的权重块不能加入。' };
-  }
-  const candidates = catalog.index.get(normalized.key) || [];
-  if (!candidates.length) {
-    return { error: '未找到完整标签。可以从下方的画师搜索结果点选。' };
-  }
-  const identities = new Set(candidates.map(({ identity }) => identity));
-  if (identities.size > 1) return { error: '这个名称对应多个完整标签，请从下方点选要加入的画师。' };
-  const preferred = preferredArtistRecord(candidates, targetModel) || candidates[0];
-  return { ...normalized, card: preferred.card };
-}
-
-function artistChainEscapeCommas(value) {
-  const text = String(value ?? '').normalize('NFKC').trim();
-  let result = '';
-  for (let index = 0; index < text.length; index++) {
-    const character = text[index];
-    if (character === ',') {
-      let slashes = 0;
-      for (let previous = index - 1; previous >= 0 && text[previous] === '\\'; previous--) slashes++;
-      if (slashes % 2 === 0) result += '\\';
-    }
-    result += character;
-  }
-  return result;
-}
-
-function artistChainPrompt(items) {
-  return items.filter((item) => !item.disabled).map((item) => {
-    const name = `artist:${artistChainEscapeCommas(item.tag)}`;
-    return item.weight === 1 ? name : `${item.weight.toFixed(1)}::${name} ::`;
-  }).join(', ');
-}
-
-function activeArtistChainCopy(draft, model) {
-  return draft.copies[model].find((copy) => copy.id === draft.activeCopyIds[model])
-    || draft.copies[model][0];
-}
-
-function activateArtistChainCopy(draft, model, copyId) {
-  const copy = draft.copies[model].find((candidate) => candidate.id === copyId);
-  if (!copy) return false;
-  draft.activeCopyIds[model] = copy.id;
-  draft.drafts[model] = copy.items;
-  if (draft.compareCopyIds[model] === copy.id) draft.compareCopyIds[model] = null;
-  return true;
-}
-
-function createArtistChainCopy(draft, model, name, items) {
-  const id = `copy-${model.replace(/[^A-Za-z0-9]/g, '')}-${draft.nextCopyId++}`;
-  const copy = {
-    id,
-    name,
-    items: items.map((item) => ({ tag: item.tag, key: item.key, weight: item.weight, disabled: item.disabled === true })),
-  };
-  draft.copies[model].push(copy);
-  return copy;
-}
-
-function compareArtistChainCopies(currentItems, otherItems) {
-  const current = new Map(currentItems.map((item) => [artistTagKey(item.tag), item]));
-  const other = new Map(otherItems.map((item) => [artistTagKey(item.tag), item]));
-  return {
-    added: currentItems.filter((item) => !other.has(artistTagKey(item.tag))),
-    removed: otherItems.filter((item) => !current.has(artistTagKey(item.tag))),
-    weights: currentItems.flatMap((item) => {
-      const match = other.get(artistTagKey(item.tag));
-      return match && match.weight !== item.weight ? [{ item, other: match }] : [];
-    }),
-    disabled: currentItems.flatMap((item) => {
-      const match = other.get(artistTagKey(item.tag));
-      return match && Boolean(match.disabled) !== Boolean(item.disabled) ? [{ item, other: match }] : [];
-    }),
-  };
-}
-
-function enqueueArtistChainTag(draft, model, value, {
-  catalog = null, targetModel = '', requireCatalog = false,
-} = {}) {
-  if (!draft?.drafts || !artistChainModels.includes(model) || !Array.isArray(draft.drafts[model])) {
-    return { error: '画风串模型草稿不可用。' };
-  }
-  if (requireCatalog && !catalog) return { error: '画师目录尚未就绪，请稍候。' };
-  const validated = catalog
-    ? validateArtistChainInput(value, catalog, targetModel)
-    : normalizeArtistChainTag(value, { escapeCommas: true });
-  if (validated.error) return validated;
-  let entry = validated;
-  if (validated.card) {
-    const canonicalTag = artistChainCardTag(validated.card);
-    if (canonicalTag) {
-      const canonical = normalizeArtistChainTag(canonicalTag, { escapeCommas: true });
-      if (canonical.error) return canonical;
-      entry = { ...canonical, card: validated.card };
-    }
-  }
-  const items = draft.drafts[model];
-  const duplicate = items.some((item) => artistTagKey(item.tag) === entry.key);
-  if (duplicate) {
-    return { duplicate: true, error: `「${entry.tag}」已在 ${model} 草稿中，没有重复加入。` };
-  }
-  if (items.length >= artistChainCapacity) {
-    return {
-      capacity: true,
-      error: `${model} 草稿最多保存 ${artistChainCapacity} 位画师，请先移除一位再加入。`,
-    };
-  }
-  const item = { tag: entry.tag, key: entry.key, weight: 1, disabled: false };
-  items.push(item);
-  return { added: true, item, tag: entry.tag, key: entry.key, card: entry.card || null };
-}
-
-function addArtistCardsToChain(cards, draft, targetModel) {
-  let added = 0;
-  let duplicates = 0;
-  let capacity = 0;
-  let invalid = 0;
-  for (const card of cards) {
-    const tag = artistChainCardTag(card);
-    const result = enqueueArtistChainTag(draft, targetModel, tag);
-    if (result.added) added++;
-    else if (result.duplicate) duplicates++;
-    else if (result.capacity) capacity++;
-    else invalid++;
-  }
-  return { added, duplicates, capacity, invalid };
-}
-
-function openArtistChainWorkbench({
-  back = null, defaultModel = null, initialArtists = [], initialTag = '',
-} = {}) {
-  openScreen('画风串工作台', back);
-  document.querySelector('.screen-inner')?.classList.add('artist-chain-open');
-  const revision = screenRevision;
-  let draft = loadArtistChainDraft();
-  let activeModel = artistChainModels.includes(defaultModel) ? defaultModel
-    : artistChainModels.includes(draft.selectedModel) ? draft.selectedModel : 'V5';
-  draft.selectedModel = activeModel;
-  const addition = addArtistCardsToChain(initialArtists, draft, activeModel);
-  if (initialArtists.length) persistArtistChainDraft(draft);
-
-  let koreanResults = [];
-  let importedResults = [];
-  let catalog = promptArtistCatalog([], { loading: true });
-  let catalogLoading = true;
-  const workbench = node('div', 'artist-chain-workbench');
-  const intro = node('p', 'resource-note',
-    'V5 与 V4.5 各有独立草稿。命名另存后可切换继续编辑；停用只影响预览与复制。');
-  const modelControls = node('div', 'artist-chain-models');
-  const modelButtons = new Map();
-  for (const model of artistChainModels) {
-    const control = chip(model, model === activeModel, () => {
-      if (activeModel === model) return;
-      activeModel = model;
-      draft.selectedModel = model;
-      persistArtistChainDraft(draft);
-      setFeedback('');
-      renderModelControls();
-      renderCopyControls();
-      renderDraft();
-      renderArtistChoices();
-    });
-    modelButtons.set(model, control);
-    modelControls.append(control);
-  }
-  modelControls.setAttribute('aria-label', '画风串模型草稿');
-
-  const copiesSection = node('section', 'artist-chain-copies');
-  const copiesHeading = node('div', 'artist-chain-copies-heading');
-  const copyCount = node('span', 'muted');
-  copiesHeading.append(node('h2', '', '当前草稿与副本'), copyCount);
-  const copyToolbar = node('div', 'artist-chain-copy-toolbar');
-  const currentCopyField = node('label', 'artist-chain-copy-field');
-  const currentCopySelect = node('select');
-  currentCopySelect.setAttribute('aria-label', '当前草稿副本');
-  currentCopyField.append(node('span', '', '当前草稿'), currentCopySelect);
-  const copyForm = node('div', 'artist-chain-save-copy');
-  const copyNameInput = textInput('input', '', '副本名称，如：柔和线稿', artistChainCopyNameMaxLength);
-  copyNameInput.setAttribute('aria-label', '新副本名称');
-  const saveCopy = button('另存副本', 'soft compact', () => saveNamedCopy());
-  copyForm.append(copyNameInput, saveCopy);
-  copyToolbar.append(currentCopyField, copyForm);
-  const copyStatus = node('p', 'artist-chain-copy-status',
-    `每个模型最多 ${artistChainCopiesPerModel} 份；副本独立保存标签、顺序、倍率与停用状态。`);
-  copiesSection.append(copiesHeading, copyToolbar, copyStatus);
-
-  const layout = node('div', 'artist-chain-layout');
-  const editor = node('section', 'artist-chain-editor');
-  const editorHeading = node('div', 'artist-chain-heading');
-  const count = node('span', 'muted');
-  const refresh = button('刷新草稿', 'text-button', () => {
-    if (artistChainStorageUnavailable) {
-      setFeedback('本机存储不可用，当前会话草稿无法从本机刷新。', true);
-      toast(artistChainStorageMessage);
-      return;
-    }
-    const stored = loadArtistChainDraft({ fresh: true });
-    draft = stored;
-    draft.selectedModel = activeModel;
-    renderModelControls();
-    renderCopyControls();
-    renderDraft();
-    setFeedback('已重新载入本机草稿。');
-    toast('画风串草稿已刷新');
-  });
-  editorHeading.append(node('h2', '', '加入画师'), count, refresh);
-
-  const form = node('form', 'artist-chain-add');
-  const input = textInput('input', '', '搜索画师名，或粘贴完整标签', 512);
-  input.autocomplete = 'off';
-  input.spellcheck = false;
-  input.setAttribute('aria-label', '搜索画师或输入完整标签');
-  const add = button('加入', 'primary compact', () => {});
-  add.type = 'submit';
-  add.disabled = true;
-  form.append(input, add);
-
-  let feedbackSequence = 0;
-  const feedback = node('p', 'artist-chain-feedback');
-  feedback.id = `artist-chain-feedback-${++feedbackSequence}`;
-  feedback.setAttribute('role', 'status');
-  input.setAttribute('aria-describedby', feedback.id);
-  const catalogStatus = node('p', 'artist-chain-catalog muted', '正在读取画师目录…');
-  const choices = node('div', 'artist-chain-choices');
-  choices.setAttribute('aria-label', '画师搜索结果');
-  choices.hidden = true;
-  const list = node('div', 'artist-chain-list');
-  editor.append(editorHeading, form, feedback, catalogStatus, choices, list);
-
-  const side = node('section', 'artist-chain-side');
-  const previewHeading = node('div', 'artist-chain-preview-heading');
-  previewHeading.append(node('h2', '', '实时预览'), node('span', 'muted', '官方倍率语法'));
-  const preview = node('div', 'prompt artist-chain-preview');
-  const copyButton = button('复制整串', 'primary artist-chain-copy-button', () => {
-    const value = artistChainPrompt(draft.drafts[activeModel]);
-    if (value) copy(value);
-  });
-  const saveStatus = node('p', 'artist-chain-save-status', artistChainStorageMessage || '草稿会自动保存在本机。');
-  saveStatus.setAttribute('role', 'status');
-  side.append(previewHeading, preview, saveStatus);
-  layout.append(editor, side);
-
-  const comparison = node('section', 'artist-chain-compare');
-  const comparisonHeading = node('div', 'artist-chain-compare-heading');
-  comparisonHeading.append(node('h2', '', 'A/B 比较'));
-  const compareField = node('label', 'artist-chain-copy-field');
-  const compareCopySelect = node('select');
-  compareCopySelect.setAttribute('aria-label', '要比较的另一份草稿');
-  compareField.append(node('span', '', '比较另一份'), compareCopySelect);
-  comparisonHeading.append(compareField);
-  const comparisonStatus = node('p', 'artist-chain-compare-status');
-  comparisonStatus.setAttribute('role', 'status');
-  const comparisonDiff = node('div', 'artist-chain-compare-diff');
-  const comparisonGrid = node('div', 'artist-chain-compare-grid');
-  comparison.append(comparisonHeading, comparisonStatus, comparisonDiff, comparisonGrid);
-
-  workbench.append(intro, modelControls, copiesSection, layout, comparison);
-  body.append(workbench);
-  const galleryButton = button('用当前画风串找图', 'soft', () => {
-    const value = draft.drafts[activeModel].filter((item) => !item.disabled)
-      .map((item) => PocketSources.tagGalleryTag(item.tag)).filter(Boolean).join(' ');
-    if (!value) {
-      toast('当前草稿没有启用的画师标签。');
-      return;
-    }
-    showTagGalleries(value, () => openArtistChainWorkbench({
-      back,
-      defaultModel: activeModel,
-    }));
-  });
-  galleryButton.classList.add('artist-chain-gallery-button');
-  actions.append(galleryButton, copyButton);
-
-  function setFeedback(message, error = false) {
-    feedback.textContent = message;
-    feedback.classList.toggle('danger', error);
-    feedback.setAttribute('aria-invalid', String(error));
-  }
-
-  function saveDraft() {
-    persistArtistChainDraft(draft);
-    saveStatus.textContent = artistChainStorageMessage;
-    saveStatus.classList.toggle('danger', artistChainStorageUnavailable);
-  }
-
-  function renderModelControls() {
-    for (const [model, control] of modelButtons) {
-      control.setAttribute('aria-pressed', String(model === activeModel));
-    }
-  }
-
-  function renderCopyControls() {
-    const copies = draft.copies[activeModel];
-    const activeCopy = activeArtistChainCopy(draft, activeModel);
-    currentCopySelect.replaceChildren(...copies.map((copy) => {
-      const option = node('option', '', `${copy.name} · ${copy.items.length} 位`);
-      option.value = copy.id;
-      return option;
-    }));
-    currentCopySelect.value = activeCopy.id;
-    currentCopySelect.disabled = copies.length < 2;
-    copyCount.textContent = `${copies.length} / ${artistChainCopiesPerModel} 份`;
-    const atCapacity = copies.length >= artistChainCopiesPerModel;
-    copyNameInput.disabled = atCapacity;
-    saveCopy.disabled = atCapacity;
-    copyStatus.textContent = atCapacity
-      ? `当前模型的 ${artistChainCopiesPerModel} 份副本已用完；仍可切换和继续编辑现有副本。`
-      : `每个模型最多 ${artistChainCopiesPerModel} 份；副本独立保存标签、顺序、倍率与停用状态。`;
-    copyStatus.classList.toggle('danger', atCapacity);
-  }
-
-  function renderPreview() {
-    const items = draft.drafts[activeModel];
-    const value = artistChainPrompt(items);
-    const enabled = items.filter((item) => !item.disabled).length;
-    preview.textContent = items.length
-      ? value || '所有画师均已停用；实时预览与复制为空。'
-      : '尚未加入画师。';
-    preview.classList.toggle('muted', !value);
-    copyButton.disabled = !value;
-    count.textContent = `${items.length} 位 · ${enabled} 启用`;
-  }
-
-  function comparisonCard(letter, chainCopy) {
-    const card = node('article', 'artist-chain-compare-card');
-    const heading = node('div', 'artist-chain-compare-card-heading');
-    const enabled = chainCopy.items.filter((item) => !item.disabled).length;
-    heading.append(node('h3', '', `${letter} · ${chainCopy.name}`),
-      node('span', 'muted', `${enabled} / ${chainCopy.items.length} 启用`));
-    const value = artistChainPrompt(chainCopy.items);
-    const prompt = node('div', 'prompt artist-chain-compare-prompt',
-      value || (chainCopy.items.length ? '所有画师均已停用。' : '这份草稿为空。'));
-    prompt.classList.toggle('muted', !value);
-    const copyAction = button(`复制 ${letter} 草稿`, 'soft compact', () => {
-      if (value) copy(value);
-    });
-    copyAction.disabled = !value;
-    card.append(heading, prompt, copyAction);
-    return card;
-  }
-
-  function renderComparison() {
-    const copies = draft.copies[activeModel];
-    const activeCopy = activeArtistChainCopy(draft, activeModel);
-    const others = copies.filter((copy) => copy.id !== activeCopy.id);
-    compareCopySelect.replaceChildren();
-    const noChoice = node('option', '', others.length ? '选择另一份草稿' : '暂无另一份草稿');
-    noChoice.value = '';
-    compareCopySelect.append(noChoice);
-    for (const copy of others) {
-      const option = node('option', '', copy.name);
-      option.value = copy.id;
-      compareCopySelect.append(option);
-    }
-    compareCopySelect.disabled = !others.length;
-    comparisonDiff.replaceChildren();
-    comparisonGrid.replaceChildren();
-
-    if (!others.length) {
-      draft.compareCopyIds[activeModel] = null;
-      compareCopySelect.value = '';
-      comparisonStatus.textContent = `当前模型只有「${activeCopy.name}」。另存一份副本后即可进行 A/B 比较。`;
-      return;
-    }
-    const selectedId = draft.compareCopyIds[activeModel];
-    const other = others.find((copy) => copy.id === selectedId);
-    if (!other) {
-      draft.compareCopyIds[activeModel] = null;
-      compareCopySelect.value = '';
-      comparisonStatus.textContent = '选择同模型的另一份副本后，会比较新增、移除、倍率与停用变化。';
-      return;
-    }
-    compareCopySelect.value = other.id;
-    comparisonStatus.textContent =
-      `A 是当前「${activeCopy.name}」，B 是「${other.name}」；预览和复制只包含各自启用的画师。`;
-    comparisonGrid.append(comparisonCard('A', activeCopy), comparisonCard('B', other));
-
-    const changes = compareArtistChainCopies(activeCopy.items, other.items);
-    const hasChanges = changes.added.length || changes.removed.length
-      || changes.weights.length || changes.disabled.length;
-    comparisonDiff.append(node('h3', '', '差异'));
-    if (!hasChanges) {
-      comparisonDiff.append(node('p', 'artist-chain-compare-same',
-        '两份草稿的画师、倍率与停用状态一致。'));
-      return;
-    }
-    const appendGroup = (title, lines) => {
-      if (!lines.length) return;
-      const group = node('div', 'artist-chain-compare-group');
-      const list = node('ul');
-      for (const line of lines) list.append(node('li', '', line));
-      group.append(node('h4', '', title), list);
-      comparisonDiff.append(group);
-    };
-    appendGroup('新增 · A 独有', changes.added.map((item) => item.tag));
-    appendGroup('移除 · B 独有', changes.removed.map((item) => item.tag));
-    appendGroup('倍率变化 · A → B', changes.weights.map(({ item, other: match }) =>
-      `${item.tag}：${item.weight.toFixed(1)}× → ${match.weight.toFixed(1)}×`));
-    appendGroup('停用变化 · A → B', changes.disabled.map(({ item, other: match }) =>
-      `${item.tag}：${item.disabled ? '停用' : '启用'} → ${match.disabled ? '停用' : '启用'}`));
-  }
-
-  function renderDraft() {
-    const items = draft.drafts[activeModel];
-    list.replaceChildren();
-    if (!items.length) {
-      const empty = node('div', 'empty artist-chain-empty');
-      empty.append(node('h3', '', '这份草稿还是空的'),
-        node('p', '', '从画师详情、原图提示词加入，或在上面粘贴一个完整标签。'));
-      list.append(empty);
-    }
-    items.forEach((item, index) => {
-      const row = node('article', 'artist-chain-item');
-      row.classList.toggle('is-disabled', Boolean(item.disabled));
-      const heading = node('div', 'artist-chain-item-heading');
-      const title = node('div', 'artist-chain-item-title');
-      title.append(node('strong', '', item.tag));
-      tagDictionaryAppend(title, item.tag, () => row.isConnected && revision === screenRevision);
-      heading.append(title, node('small', 'muted', `第 ${index + 1} 位${item.disabled ? ' · 已停用' : ''}`));
-      const controls = node('div', 'artist-chain-item-controls');
-      const up = button('上移', 'soft compact', () => {
-        if (!index) return;
-        [items[index - 1], items[index]] = [items[index], items[index - 1]];
-        saveDraft();
-        renderDraft();
-      });
-      const down = button('下移', 'soft compact', () => {
-        if (index >= items.length - 1) return;
-        [items[index + 1], items[index]] = [items[index], items[index + 1]];
-        saveDraft();
-        renderDraft();
-      });
-      const remove = button('移除', 'text-button danger', () => {
-        items.splice(index, 1);
-        saveDraft();
-        setFeedback(`已移除 ${item.tag}。`);
-        renderDraft();
-      });
-      const toggle = button(item.disabled ? '恢复' : '停用',
-        item.disabled ? 'soft compact' : 'text-button', () => {
-          item.disabled = !item.disabled;
-          saveDraft();
-          setFeedback(`${item.disabled ? '已停用' : '已恢复'} ${item.tag}；顺序与倍率保持不变。`);
-          renderDraft();
-        });
-      toggle.setAttribute('aria-label', `${item.disabled ? '恢复' : '停用'} ${item.tag}`);
-      up.disabled = index === 0;
-      down.disabled = index === items.length - 1;
-      controls.append(up, down, toggle, remove);
-
-      const weightGroup = node('div', 'artist-chain-weight');
-      const decrease = button('−', 'icon-button', () => updateWeight(item.weight - .1));
-      decrease.setAttribute('aria-label', `降低 ${item.tag} 的倍率`);
-      const weight = node('input', 'artist-chain-weight-input');
-      weight.type = 'number';
-      weight.inputMode = 'decimal';
-      weight.min = '0';
-      weight.max = '3';
-      weight.step = '0.1';
-      weight.value = item.weight.toFixed(1);
-      weight.setAttribute('aria-label', `${item.tag} 的倍率，范围 0 到 3，步长 0.1`);
-      const increase = button('+', 'icon-button', () => updateWeight(item.weight + .1));
-      increase.setAttribute('aria-label', `提高 ${item.tag} 的倍率`);
-      const presets = node('div', 'artist-chain-weight-presets');
-      presets.setAttribute('role', 'group');
-      presets.setAttribute('aria-label', `${item.tag} 的常用倍率`);
-      const presetButtons = [.7, 1, 1.3, 1.5].map((value) => {
-        const preset = button(`${value.toFixed(1)}×`, 'soft artist-chain-weight-preset',
-          () => updateWeight(value));
-        preset.setAttribute('aria-label', `将 ${item.tag} 的倍率设为 ${value.toFixed(1)}`);
-        preset.setAttribute('aria-pressed', String(item.weight === value));
-        presets.append(preset);
-        return [value, preset];
-      });
-      function updateWeight(next, { syncInput = true, announce = true } = {}) {
-        const numeric = Number(next);
-        if (!Number.isFinite(numeric)) return;
-        item.weight = Math.min(3, Math.max(0, Math.round(numeric * 10) / 10));
-        if (syncInput) {
-          weight.value = item.weight.toFixed(1);
-          weight.removeAttribute('aria-invalid');
-        }
-        decrease.disabled = item.weight === 0;
-        increase.disabled = item.weight === 3;
-        for (const [value, preset] of presetButtons) {
-          preset.setAttribute('aria-pressed', String(item.weight === value));
-        }
-        saveDraft();
-        renderPreview();
-        renderComparison();
-        if (announce) setFeedback(`已将 ${item.tag} 设为 ${item.weight.toFixed(1)} 倍。`);
-      }
-      decrease.disabled = item.weight === 0;
-      increase.disabled = item.weight === 3;
-      weight.addEventListener('input', () => {
-        const raw = weight.value.trim();
-        if (!raw) return;
-        const next = Number(raw);
-        const valid = Number.isFinite(next) && next >= 0 && next <= 3
-          && Math.abs(next * 10 - Math.round(next * 10)) < 1e-9;
-        weight.setAttribute('aria-invalid', String(!valid));
-        if (!valid) {
-          setFeedback(`倍率需在 0–3 之间并按 0.1 递增；当前仍保留 ${item.weight.toFixed(1)}。`, true);
-          return;
-        }
-        updateWeight(next, { syncInput: false });
-      });
-      weight.addEventListener('blur', () => {
-        weight.value = item.weight.toFixed(1);
-        weight.removeAttribute('aria-invalid');
-      });
-      weightGroup.append(decrease, weight, increase);
-      row.append(heading, weightGroup, presets, controls);
-      list.append(row);
-    });
-    renderPreview();
-    renderComparison();
-    saveStatus.textContent = artistChainStorageMessage;
-    saveStatus.classList.toggle('danger', artistChainStorageUnavailable);
-  }
-
-  currentCopySelect.addEventListener('change', () => {
-    const copy = draft.copies[activeModel].find((candidate) => candidate.id === currentCopySelect.value);
-    if (!copy || !activateArtistChainCopy(draft, activeModel, copy.id)) return;
-    draft.selectedModel = activeModel;
-    saveDraft();
-    setFeedback(`已切换到「${copy.name}」，可继续编辑。`);
-    renderCopyControls();
-    renderDraft();
-  });
-
-  compareCopySelect.addEventListener('change', () => {
-    const copyId = compareCopySelect.value || null;
-    draft.compareCopyIds[activeModel] = copyId;
-    saveDraft();
-    renderComparison();
-  });
-
-  function saveNamedCopy() {
-    const copies = draft.copies[activeModel];
-    if (copies.length >= artistChainCopiesPerModel) {
-      setFeedback(`当前模型已有 ${artistChainCopiesPerModel} 份副本，无法继续另存。`, true);
-      return;
-    }
-    const normalized = normalizeArtistChainCopyName(copyNameInput.value);
-    if (normalized.error) {
-      setFeedback(normalized.error, true);
-      copyNameInput.focus();
-      return;
-    }
-    if (copies.some((copy) => copy.name.toLocaleLowerCase() === normalized.name.toLocaleLowerCase())) {
-      setFeedback('当前模型已有同名副本，请换一个名称。', true);
-      copyNameInput.focus();
-      return;
-    }
-    const previousCopy = activeArtistChainCopy(draft, activeModel);
-    const copy = createArtistChainCopy(draft, activeModel, normalized.name, draft.drafts[activeModel]);
-    activateArtistChainCopy(draft, activeModel, copy.id);
-    draft.compareCopyIds[activeModel] = previousCopy.id;
-    draft.selectedModel = activeModel;
-    copyNameInput.value = '';
-    saveDraft();
-    setFeedback(`已另存并切换到「${copy.name}」；A/B 已将它和「${previousCopy.name}」比较。`);
-    renderCopyControls();
-    renderDraft();
-    toast(`已另存副本「${copy.name}」`);
-  }
-
-  function finishArtistAddition(result) {
-    if (!result.added) {
-      setFeedback(result.error, true);
-      input.focus();
-      return;
-    }
-    input.value = '';
-    renderArtistChoices();
-    saveDraft();
-    setFeedback(`已加入 ${result.tag}，默认 1.0 倍。`);
-    renderDraft();
-    input.focus();
-  }
-
-  function renderArtistChoices() {
-    choices.replaceChildren();
-    choices.hidden = true;
-    const terms = cardSearchTerms(input.value, 'artist');
-    if (catalogLoading || !terms.length) return;
-    choices.hidden = false;
-    const matches = new Map();
-    for (const record of catalog.records) {
-      if (!matchesCardSearch(record.card, terms)) continue;
-      if (!matches.has(record.identity)) matches.set(record.identity, []);
-      matches.get(record.identity).push(record);
-    }
-    if (!matches.size) {
-      choices.append(node('p', 'muted', '当前已加载的画师目录里没有搜索结果。'));
-      return;
-    }
-    const rank = (key) => key === terms[0] ? 0 : key.startsWith(terms[0]) ? 1 : 2;
-    const ordered = [...matches].sort(([a], [b]) => rank(a) - rank(b) || a.localeCompare(b, 'en'));
-    let displayed = 0;
-    for (const [, records] of ordered) {
-      if (displayed === 8) break;
-      const card = preferredArtistRecord(records, activeModel).card;
-      const tag = artistChainCardTag(card);
-      if (!tag) continue;
-      displayed++;
-      const row = node('div', 'pack-source');
-      const label = node('div');
-      label.append(node('strong', '', tag), node('small', '', [card.source, card.model].filter(Boolean).join(' · ')));
-      tagDictionaryAppend(label, tag, () => label.isConnected && revision === screenRevision);
-      const select = button('加入', 'soft compact', () => finishArtistAddition(enqueueArtistChainTag(draft, activeModel, tag)));
-      select.setAttribute('aria-label', `加入 ${tag}`);
-      row.append(label, select);
-      choices.append(row);
-    }
-    if (!displayed) choices.append(node('p', 'muted', '匹配到的条目没有可加入的单画师标签。'));
-    else if (ordered.length > 8) choices.append(node('p', 'muted', `共 ${number.format(ordered.length)} 个结果，可输入更完整的名称缩小范围。`));
-  }
-
-  let searchTimer;
-  input.addEventListener('input', () => {
-    clearTimeout(searchTimer);
-    setFeedback('');
-    choices.hidden = true;
-    searchTimer = setTimeout(() => {
-      if (revision === screenRevision) renderArtistChoices();
-    }, 140);
-  });
-  form.addEventListener('submit', (event) => {
-    event.preventDefault();
-    if (catalogLoading) {
-      setFeedback('画师目录仍在读取，请稍候。', true);
-      return;
-    }
-    const result = enqueueArtistChainTag(draft, activeModel, input.value, {
-      catalog, targetModel: activeModel, requireCatalog: true,
-    });
-    finishArtistAddition(result);
-    if (!result.added) renderArtistChoices();
-  });
-
-  renderCopyControls();
-  renderDraft();
-  let pendingInitialTag = String(initialTag || '').normalize('NFKC').trim();
-  function refreshArtistChoices() {
-    if (revision !== screenRevision) return;
-    catalog = promptArtistCatalog(koreanResults, { loading: catalogLoading, importedResults });
-    if (catalogLoading) return;
-    add.disabled = false;
-    catalogStatus.textContent = `已载入 ${number.format(catalog.index.size)} 个完整画师标签 · ${promptArtistCatalogNote(catalog)}。`;
-    renderArtistChoices();
-    if (pendingInitialTag && !input.value.trim()) {
-      const result = enqueueArtistChainTag(draft, activeModel, pendingInitialTag, {
-        catalog, targetModel: activeModel, requireCatalog: true,
-      });
-      input.value = pendingInitialTag;
-      pendingInitialTag = '';
-      if (result.added) finishArtistAddition(result);
-      else {
-        setFeedback(result.error, true);
-        renderArtistChoices();
-      }
-    }
-  }
-  Promise.allSettled(koreanPacks.map(([id]) => loadKoreanCatalog(id))).then((results) => {
-    koreanResults = results;
-    catalogLoading = false;
-    refreshArtistChoices();
-  }).catch(() => {
-    if (revision !== screenRevision) return;
-    catalogLoading = false;
-    add.disabled = false;
-    catalogStatus.textContent = '画师目录读取失败，暂时无法手动验证新标签。';
-    if (pendingInitialTag) {
-      input.value = pendingInitialTag;
-      pendingInitialTag = '';
-      setFeedback('图站画师标签已放入输入框；目录读取失败，请稍后手动校验。', true);
-    }
-  });
-  loadSavedNaxDirectory(revision)?.then(() => {
-    if (state.online) refreshArtistChoices();
-  }).catch(() => { /* The bundled and imported catalogs remain available. */ });
-  loadImportedArtistCatalogs().then((results) => {
-    importedResults = results;
-    if (results.length) refreshArtistChoices();
-  });
-
-  if (addition.added || addition.duplicates || addition.capacity) {
-    const parts = [];
-    if (addition.added) parts.push(`已加入 ${addition.added} 位画师`);
-    if (addition.duplicates) parts.push(`${addition.duplicates} 位已在当前草稿`);
-    if (addition.capacity) parts.push(`${activeModel} 草稿已达到 ${artistChainCapacity} 位上限`);
-    toast(parts.join('；'));
-  }
-}
-
-function promptQuoteEnd(text, start) {
-  const quote = text[start].normalize('NFKC');
-  for (let index = start + 1; index < text.length; index++) {
-    const character = text[index].normalize('NFKC');
-    if (character === '\\') {
-      index++;
-      continue;
-    }
-    if (character !== quote) continue;
-    let nextIndex = index + 1;
-    while (nextIndex < text.length && /\s/.test(text[nextIndex])) nextIndex++;
-    const next = (text[nextIndex] || '').normalize('NFKC');
-    if (!next || ',)]}:'.includes(next)) return index;
-    const previous = text[index - 1].normalize('NFKC');
-    if (/[\s,([{:]/.test(previous)) return -1;
-  }
-  return -1;
-}
-
-function splitPromptTags(value, recognizeBlocks = false) {
-  const parts = [];
-  let start = 0;
-  let depth = 0;
-  const text = String(value ?? '');
-  const boundary = /(?:\\?<\/?(?:style|artist)\s*\\?>|&lt;\/?(?:style|artist)\s*&gt;)(?:\\(?=\r?\n))?|(?:\\?\r?\n)(?=[ \t]*(?:[+-]?(?:\d+(?:\.\d+)?|\.\d+)\s*::\s*)?artist\s*:)/iy;
-  for (let index = 0; index < text.length; index++) {
-    const character = text[index].normalize('NFKC');
-    if (recognizeBlocks && depth === 0 && /[<\\&\r\n]/.test(character)) {
-      boundary.lastIndex = index;
-      if (boundary.test(text)) {
-        parts.push(text.slice(start, index));
-        start = boundary.lastIndex;
-        index = start - 1;
-        continue;
-      }
-    }
-    if (character === '\\') {
-      index++;
-      continue;
-    }
-    if (character === '"' || character === "'") {
-      const previous = (text[index - 1] || '').normalize('NFKC');
-      if (index === start || /[\s([{:]/.test(previous)) {
-        const end = promptQuoteEnd(text, index);
-        if (end !== -1) {
-          index = end;
-          continue;
-        }
-      }
-    }
-    if ('([{'.includes(character)) depth++;
-    else if (')]}'.includes(character) && depth > 0) depth--;
-    if (depth === 0 && character === ',') {
-      parts.push(text.slice(start, index));
-      start = index + 1;
-    }
-  }
-  parts.push(text.slice(start));
-  return parts;
-}
-
-function unwrapPromptTag(value) {
-  let result = String(value ?? '').trim();
-  let changed = false;
-  while (result.length >= 2) {
-    const opening = result[0];
-    const closing = opening === '(' ? ')' : opening === '[' ? ']' : opening === '{' ? '}' : '';
-    if (!closing || result[result.length - 1] !== closing) break;
-    let depth = 0;
-    let closesAt = -1;
-    for (let index = 0; index < result.length; index++) {
-      const character = result[index];
-      if (character === '\\') {
-        index++;
-        continue;
-      }
-      if (character === opening) depth++;
-      else if (character === closing) {
-        depth--;
-        if (depth === 0) {
-          closesAt = index;
-          break;
-        }
-      }
-    }
-    if (closesAt !== result.length - 1) break;
-    result = result.slice(1, -1).trim();
-    changed = true;
-  }
-  return { value: result, changed };
-}
-
-function visitPromptTag(value, original, weightedContext, output) {
-  let tag = String(value ?? '').normalize('NFKC').trim();
-  if (!tag) return;
-  tag = tag.replace(/^::\s*/, '').trim();
-  tag = tag.replace(/\s*::\s*$/, '').trim();
-  if (!tag) return;
-  const weightedPrefix = /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)\s*::\s*/.exec(tag);
-  if (weightedPrefix) {
-    let body = tag.slice(weightedPrefix[0].length).trim();
-    if (body.endsWith('::')) body = body.slice(0, -2).trim();
-    for (const part of splitPromptTags(body)) visitPromptTag(part, original, 'numeric', output);
-    return;
-  }
-  const unwrapped = unwrapPromptTag(tag);
-  if (unwrapped.changed) {
-    const parts = splitPromptTags(unwrapped.value);
-    for (const part of parts) visitPromptTag(part, original, weightedContext || 'wrapped', output);
-    return;
-  }
-  if (weightedContext) {
-    tag = tag.replace(/\s*:\s*[+-]?(?:\d+(?:\.\d+)?|\.\d+)\s*$/, '').trim();
-  }
-  if (!tag) return;
-  const explicit = /^artist\s*:\s*([\s\S]*)$/i.exec(tag);
-  let name = (explicit ? explicit[1] : tag).trim();
-  const repairColon = Boolean(explicit && weightedContext === 'numeric' && /[^:\\]:$/.test(name));
-  if ((name[0] === '"' || name[0] === "'") && promptQuoteEnd(name, 0) === name.length - 1) {
-    name = name.slice(1, -1).trim();
-  }
-  if (!name) return;
-  output.push({
-    explicit: Boolean(explicit),
-    name: unescapeTagPunctuation(name),
-    key: artistTagKey(name),
-    original: original || tag,
-    repairColon,
-  });
-}
-
-function extractPromptTags(value) {
-  const output = [];
-  for (const part of splitPromptTags(value, true)) {
-    const original = part.trim();
-    const parsed = part.replace(/\\\r?\n/g, '\n').replace(/^\s*(?:&#x20;\s*)+/i, '');
-    visitPromptTag(parsed, original, null, output);
-  }
-  return output;
-}
-
-function artistCardTag(card) {
-  const title = String(card?.title ?? '').normalize('NFKC').trim();
-  if (title) return title.replace(/^artist\s*:\s*/i, '').trim();
-  return String(card?.prompt ?? '').normalize('NFKC').trim().replace(/^artist\s*:\s*/i, '').trim();
-}
-
-function artistChainCardTag(card) {
-  const explicit = extractPromptTags(card?.prompt).filter((item) => item.explicit);
-  if (explicit.length === 1) {
-    const fromPrompt = normalizeArtistChainTag(explicit[0].name, { escapeCommas: true });
-    if (!fromPrompt.error) return fromPrompt.tag;
-  }
-  const fromTitle = normalizeArtistChainTag(card?.title, { escapeCommas: true });
-  return fromTitle.error ? '' : fromTitle.tag;
-}
-
-function promptArtistCatalog(koreanResults = [], { loading = false, importedResults = [] } = {}) {
-  const records = [];
-  const identities = new Set();
-  const addCards = (cards, kind) => {
-    for (const card of Array.isArray(cards) ? cards : []) {
-      if (card?.section !== 'artist') continue;
-      const name = artistCardTag(card);
-      const key = artistTagKey(name);
-      if (!key) continue;
-      const recordId = [kind, card.id, card.title, card.source, card.model].join('\u0000');
-      if (identities.has(recordId)) continue;
-      identities.add(recordId);
-      const keys = [key];
-      let identity = key;
-      const explicitName = /^artist\s*:\s*([\s\S]+)$/i.exec(card.prompt || '')?.[1];
-      if (explicitName && explicitName !== name) {
-        const tags = extractPromptTags(card.prompt);
-        const tag = tags[0];
-        if (tags.length === 1 && tag.explicit && tag.key && tag.key !== key) {
-          keys.push(tag.key);
-          identity = tag.key;
-        }
-      }
-      records.push({ card, keys, kind, identity });
-    }
-  };
-  if (loading) addCards(state.korean, 'korean');
-  for (const result of koreanResults) {
-    if (result.status === 'fulfilled') addCards(result.value, 'korean');
-  }
-  addCards(state.packRows, 'imported');
-  for (const result of importedResults) {
-    if (result.status === 'fulfilled') addCards(result.value, 'imported');
-  }
-  addCards(state.online, 'nax');
-  const index = new Map();
-  for (const record of records) {
-    for (const key of record.keys) {
-      if (!index.has(key)) index.set(key, []);
-      index.get(key).push(record);
-    }
-  }
-  const failures = koreanResults
-    .map((result, index) => result.status === 'rejected' ? koreanPacks[index]?.[1] : '')
-    .filter(Boolean);
-  return {
-    index,
-    records,
-    loading,
-    koreanReady: koreanResults.filter((result) => result.status === 'fulfilled').length,
-    koreanFailures: failures,
-    naxCount: records.filter((record) => record.kind === 'nax').length,
-    importedCount: records.filter((record) => record.kind === 'imported').length,
-    importedFailures: importedResults.filter((result) => result.status === 'rejected').length,
-  };
-}
-
-function characterPromptCaption(entry) {
-  return typeof entry === 'string' ? entry : entry?.char_caption || '';
-}
-
-function promptArtistSources(generation) {
-  const positive = [];
-  const negative = [];
-  if (generation.prompt) positive.push({ label: '主提示词 · 正向', prompt: generation.prompt });
-  if (generation.negativePrompt) negative.push({ label: '主提示词 · 负向', prompt: generation.negativePrompt });
-  const characters = Array.isArray(generation.characters) ? generation.characters : [];
-  const negativeCharacters = Array.isArray(generation.negativeCharacters) ? generation.negativeCharacters : [];
-  for (let index = 0; index < Math.max(characters.length, negativeCharacters.length); index++) {
-    const prompt = characterPromptCaption(characters[index]);
-    const negativePrompt = characterPromptCaption(negativeCharacters[index]);
-    if (prompt) positive.push({ label: `角色 ${index + 1} · 正向`, prompt });
-    if (negativePrompt) negative.push({ label: `角色 ${index + 1} · 负向`, prompt: negativePrompt });
-  }
-  return { positive, negative };
-}
-
-function collectPromptArtists(generation, catalog, negative = false) {
-  const output = new Map();
-  const sources = promptArtistSources(generation)[negative ? 'negative' : 'positive'];
-  for (const source of sources) {
-    for (const tag of extractPromptTags(source.prompt)) {
-      let key = tag.key;
-      let name = tag.name;
-      let candidates = catalog.index.get(key) || [];
-      if (tag.repairColon && !candidates.length) {
-        const colonlessName = name.slice(0, -1).trimEnd();
-        const colonlessKey = artistTagKey(colonlessName);
-        const colonlessCandidates = catalog.index.get(colonlessKey) || [];
-        if (colonlessKey && colonlessCandidates.length) {
-          key = colonlessKey;
-          name = colonlessName;
-          candidates = colonlessCandidates;
-        }
-      }
-      if (!tag.explicit && !candidates.length) {
-        const alternate = /^artist_(.+)$/i.exec(tag.name)?.[1];
-        const alternateKey = alternate ? artistTagKey(alternate) : '';
-        if (alternateKey && catalog.index.has(alternateKey)) {
-          key = alternateKey;
-          candidates = catalog.index.get(key);
-        }
-      }
-      if (!tag.explicit && !candidates.length) continue;
-      const identities = new Set(candidates.map(({ identity }) => identity));
-      const ambiguous = identities.size > 1;
-      if (!output.has(key)) {
-        output.set(key, {
-          key, name, explicit: tag.explicit,
-          candidates: ambiguous ? [] : candidates, ambiguous, sources: new Set(), originals: new Set(),
-        });
-      }
-      const item = output.get(key);
-      item.explicit ||= tag.explicit;
-      item.sources.add(source.label);
-      item.originals.add(tag.original);
-    }
-  }
-  return output;
-}
-
-function artistModelSeries(value) {
-  const text = String(value ?? '');
-  if (/V5/i.test(text)) return 'V5';
-  if (/V4\.5/i.test(text)) return 'V4.5';
-  return '';
-}
-
-function preferredArtistRecord(candidates, targetModel) {
-  const kindRank = { imported: 3, korean: 2, nax: 1 };
-  return [...candidates].map((record, index) => {
-    const series = artistModelSeries(record.card.model);
-    return {
-      record, index,
-      score: (targetModel && series === targetModel ? 1000 : 0)
-        + (record.card.photos?.length ? 100 : 0)
-        + (kindRank[record.kind] || 0),
-    };
-  }).sort((left, right) => right.score - left.score || left.index - right.index)[0]?.record;
-}
-
-function promptArtistCatalogNote(catalog) {
-  const parts = [];
-  if (catalog.loading) parts.push('韩国目录读取中');
-  else {
-    const failure = catalog.koreanFailures.length ? `（${catalog.koreanFailures.join('、')}失败）` : '';
-    parts.push(`韩国 ${catalog.koreanReady}/${koreanPacks.length}${failure}`);
-  }
-  if (Array.isArray(state.online)) parts.push(`NAX ${catalog.naxCount} 位`);
-  else if (state.onlineTask) parts.push('NAX 读取中');
-  else parts.push('NAX 未加载');
-  if (Array.isArray(state.packRows)) {
-    const failures = catalog.importedFailures ? `（${catalog.importedFailures} 个目录未能读取）` : '';
-    parts.push(`导入 ${catalog.importedCount} 位${failures}`);
-  }
-  else if (state.importing) parts.push('导入目录读取中');
-  else parts.push('导入目录未加载');
-  return parts.join(' · ');
-}
-
-let promptArtistPanelSequence = 0;
-
-function promptArtistRow(item, catalog, targetModel, openSample, polarity, sampleState) {
-  const row = node('div', 'prompt-artist-row');
-  const header = node('div', 'pack-source');
-  const info = node('div');
-  info.append(node('strong', '', item.name));
-  tagDictionaryAppend(info, item.name, () => row.isConnected);
-  if (item.candidates.length) {
-    const librarySources = [...new Set(item.candidates.map((record) =>
-      record.card.source || (record.kind === 'nax' ? 'NAX' : record.kind === 'imported' ? '已导入' : '韩国 V5')))];
-    info.append(node('small', '', `库内同名 · ${librarySources.join('；')}`));
-  } else if (item.ambiguous) {
-    info.append(node('small', '', '同名对应多个完整标签，可在画风串里搜索确认。'));
-  } else {
-    info.append(node('small', '', '显式 artist: · 已保留，当前目录未精确命中'));
-  }
-  info.append(node('small', '', `来源：${[...item.sources].join('、')} · 原值：${[...item.originals].join(' / ')}`));
-  const controls = node('div', 'copy-fact');
-  controls.append(button('复制原标签', 'text-button', () => copy([...item.originals].join('\n'))));
-  const preferred = preferredArtistRecord(item.candidates, targetModel);
-  if (preferred) {
-    const sampleModel = preferred.card.model || '未标注';
-    const targetSeries = artistModelSeries(targetModel);
-    const sampleSeries = artistModelSeries(sampleModel);
-    info.append(node('small', '', `样图模型：${sampleModel}${targetSeries && sampleSeries && targetSeries !== sampleSeries ? `（当前 ${targetSeries}）` : ''}`));
-    const photos = Array.isArray(preferred.card.photos) ? preferred.card.photos : [];
-    if (photos.length) {
-      const stateKey = `${polarity}:${item.key}`;
-      const state = sampleState.get(stateKey) || { expanded: false, index: 0 };
-      if (!Number.isSafeInteger(state.index) || state.index < 0 || state.index >= photos.length) state.index = 0;
-      sampleState.set(stateKey, state);
-      const panel = node('div', 'artist-sample-panel');
-      panel.id = `artist-sample-${++promptArtistPanelSequence}`;
-      panel.hidden = true;
-      let loadRevision = 0;
-      let toggle;
-
-      function loadSample() {
-        const photo = photos[state.index];
-        const revision = ++loadRevision;
-        panel.hidden = false;
-        if (!photo?.url) {
-          panel.replaceChildren(node('p', 'resource-note', '样图加载失败：当前条目没有可用的图片地址。'));
-          return;
-        }
-        const frame = node('div', 'photo');
-        const status = node('div', 'artist-sample-status', '正在读取样图…');
-        status.setAttribute('role', 'status');
-        const image = node('img');
-        image.alt = `${item.name} · ${photo.label || `样图 ${state.index + 1}`}`;
-        image.hidden = true;
-        image.onload = () => {
-          if (revision !== loadRevision || panel.hidden) return;
-          image.hidden = false;
-          status.remove();
-        };
-        image.onerror = () => {
-          if (revision !== loadRevision || panel.hidden) return;
-          image.hidden = true;
-          status.replaceChildren(node('span', '', '样图加载失败。'),
-            button('重试', 'text-button', loadSample));
-        };
-        const position = node('span', '', `${state.index + 1} / ${photos.length} · ${photo.label || '样图'}`);
-        const previous = button('上一张', 'text-button', () => {
-          state.index = (state.index + photos.length - 1) % photos.length;
-          loadSample();
-        });
-        const next = button('下一张', 'text-button', () => {
-          state.index = (state.index + 1) % photos.length;
-          loadSample();
-        });
-        previous.disabled = next.disabled = photos.length < 2;
-        const nav = node('div', 'photo-nav artist-sample-nav');
-        nav.append(previous, position, next);
-        frame.append(status, image);
-        panel.replaceChildren(frame, nav);
-        image.src = photo.url;
-      }
-
-      toggle = button(state.expanded ? '收起样图' : '看样图', 'soft compact', () => {
-        state.expanded = !state.expanded;
-        panel.hidden = !state.expanded;
-        toggle.textContent = state.expanded ? '收起样图' : '看样图';
-        toggle.setAttribute('aria-expanded', String(state.expanded));
-        if (state.expanded) loadSample();
-        else loadRevision++;
-      });
-      toggle.setAttribute('aria-expanded', String(state.expanded));
-      toggle.setAttribute('aria-controls', panel.id);
-      controls.append(toggle);
-      if (state.expanded) loadSample();
-      header.append(info, controls);
-      row.append(header, panel);
-      return row;
-    }
-    controls.append(button('看详情', 'soft compact', () => openSample(preferred.card)));
-  }
-  header.append(info, controls);
-  row.append(header);
-  return row;
-}
-
-function renderPromptArtistUsage(generation, catalog, openSample, sampleState, openArtistChain) {
-  const section = node('section', 'tool-section');
-  const title = node('h2', '', '画风库画师');
-  const used = collectPromptArtists(generation, catalog);
-  const negative = collectPromptArtists(generation, catalog, true);
-  const targetModel = artistModelSeries(novelAiModelLabel(
-    generation.parameters?.model || generation.parameters?.model_name || generation.model,
-    generation.parameters?.model_hash));
-  const matchedPositive = [...used.values()].filter((item) => item.candidates.length);
-  title.append(node('span', 'muted', ` · 正向命中 ${matchedPositive.length} 位`));
-  section.append(title,
-    node('p', 'resource-note', `${promptArtistCatalogNote(catalog)}。仅按完整标签精确识别；无前缀必须与库内规范化名称完全一致，不扫描自然语言。`));
-  if (matchedPositive.length && openArtistChain) {
-    section.append(button(`把识别到的 ${matchedPositive.length} 位画师加入画风串`, 'soft compact', () => {
-      openArtistChain(matchedPositive, targetModel);
-    }));
-  }
-  if (!used.size) {
-    section.append(node('p', 'detail-note', catalog.loading
-      ? '显式 artist 已可识别；无前缀画师会在目录读取完成后按同名匹配。'
-      : '没有识别到正向使用的库内画师。'));
-  } else {
-    for (const item of used.values()) {
-      section.append(promptArtistRow(item, catalog, targetModel, openSample, 'positive', sampleState));
-    }
-  }
-  if (negative.size) {
-    const details = node('details', 'metadata-details');
-    details.append(node('summary', '', `负向中出现 · ${negative.size} 位（不视为使用）`));
-    for (const item of negative.values()) {
-      details.append(promptArtistRow(item, catalog, targetModel, openSample, 'negative', sampleState));
-    }
-    section.append(details);
-  }
-  return section;
-}
-
-const promptCoverBytes = 192 * 1024;
-
-function smallPromptPreview(value) {
-  return typeof value === 'string' && value.length <= promptCoverBytes * 4 / 3 + 'data:image/jpeg;base64,'.length
-    && /^data:image\/(?:jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(value);
-}
-
-async function promptFavoriteCover(preview, galleryItem, sampleImage) {
-  if (smallPromptPreview(preview)) return preview;
-  try {
-    if (galleryItem) {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5000);
-      try {
-        const response = await fetch(galleryImageUrl(galleryItem, true), { signal: controller.signal });
-        if (!response.ok) return null;
-        const blob = await response.blob();
-        if (blob.size > promptCoverBytes || !['image/jpeg', 'image/webp'].includes(blob.type)) return null;
-        return new Promise((resolve) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(smallPromptPreview(reader.result) ? reader.result : null);
-          reader.onerror = reader.onabort = () => resolve(null);
-          try { reader.readAsDataURL(blob); } catch { resolve(null); }
-        });
-      } finally { clearTimeout(timeout); }
-    }
-    if (!sampleImage?.naturalWidth || !sampleImage.naturalHeight) return null;
-    const scale = Math.min(1, 384 / Math.max(sampleImage.naturalWidth, sampleImage.naturalHeight));
-    const canvas = node('canvas');
-    canvas.width = Math.max(1, Math.round(sampleImage.naturalWidth * scale));
-    canvas.height = Math.max(1, Math.round(sampleImage.naturalHeight * scale));
-    const context = canvas.getContext('2d', { alpha: false });
-    if (!context) return null;
-    context.fillStyle = '#fff';
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    context.drawImage(sampleImage, 0, 0, canvas.width, canvas.height);
-    const cover = canvas.toDataURL('image/jpeg', .8);
-    return smallPromptPreview(cover) ? cover : null;
-  } catch {
-    return null;
-  }
-}
-
-function showPromptImport(data, {
-  back = null, galleryItem = null, resourcePhoto = null, promptState = null, promptScroll = 0,
-  referenceTags = [], referenceSource = '', referenceSite = 'danbooru', referenceSelected = [],
-} = {}) {
-  const sample = Boolean(resourcePhoto);
-  const references = (Array.isArray(referenceTags) ? referenceTags : [])
-    .map((tag) => typeof tag === 'string' ? { name: tag, kind: '' } : tag)
-    .filter((tag) => tag && String(tag.name || '').trim())
-    .map((tag) => ({ name: String(tag.name).trim(), kind: String(tag.kind || '').trim() }));
-  const selectedReferences = new Set((Array.isArray(referenceSelected) ? referenceSelected : [])
-    .map((value) => String(value).trim()).filter(Boolean));
-  openScreen(sample ? '样图提示词与参数'
-    : references.length && !data.found ? '图站参考标签' : '原图提示词与参数', back);
-  const revision = screenRevision;
-  const restored = promptState && typeof promptState === 'object' ? promptState : null;
-  const restoredScroll = Number.isFinite(promptScroll) ? Math.max(0, promptScroll) : 0;
-  const libraryButton = button('存小预览到图库', 'soft compact', async () => {
-    libraryButton.disabled = true;
-    try {
-      const saved = await native('saveLastOriginal');
-      if (revision !== screenRevision) return;
-      if (!saved?.id) throw new Error('无法保存原图。');
-      libraryButton.replaceWith(button('打开原图图库', 'soft compact', showGallery));
-      toast(saved.promptCached ? '图库已保存图片预览和生成信息' : '图片预览已在图库');
-    } catch (error) {
-      if (revision !== screenRevision) return;
-      libraryButton.disabled = false;
-      toast(error.message);
-    }
-  });
-  let fallbackPreview = null;
-  if (!resourcePhoto?.preview && smallPromptPreview(data.preview)) {
-    fallbackPreview = node('img', 'original-preview');
-    fallbackPreview.src = data.preview;
-    fallbackPreview.alt = '所选原图预览';
-  } else if (!resourcePhoto?.preview && galleryItem) {
-    fallbackPreview = node('img', 'original-preview');
-    fallbackPreview.src = galleryImageUrl(galleryItem, true);
-    fallbackPreview.alt = '图库小预览';
-    fallbackPreview.addEventListener('error', () => {
-      fallbackPreview.remove();
-      layout.classList.remove('has-preview');
-      if (revision === screenRevision) screen.classList.remove('detail-wide');
-    });
-  }
-  const hasPreview = Boolean(resourcePhoto?.preview || fallbackPreview);
-  if (hasPreview) screen.classList.add('detail-wide');
-  const layout = node('div', `prompt-import-layout${hasPreview ? ' has-preview' : ''}`);
-  const media = node('div', 'prompt-import-media');
-  const info = node('div', 'prompt-import-info');
-  layout.append(media, info);
-  body.append(layout);
-  if (!galleryItem && !sample && !references.length) info.append(libraryButton);
-  if (sample) {
-    const source = resourcePhoto;
-    if (source.preview) {
-      source.preview.className = 'original-preview';
-      media.append(source.preview);
-    }
-    const facts = ['样图', source.title, source.label, source.source].filter(Boolean);
-    info.append(node('p', 'resource-note', facts.join(' · ')));
-  }
-  if (galleryItem) {
-    info.append(node('p', 'resource-note', data.promptCached
-      ? '生成信息已在本机保存。'
-      : '此次结果未能存入图库。可使用「收藏所选」长期保留需要的内容。'));
-  }
-  if (fallbackPreview) media.append(fallbackPreview);
-  const hasGeneration = Boolean(data.found || data.actualPrompt || data.actualNegativePrompt
-    || data.actualCharacters?.length || data.actualNegativeCharacters?.length);
-  const availablePrompt = hasGeneration || references.length;
-  if (!availablePrompt) info.append(node('p', 'detail-note', data.message || '未读到提示词。截图和转存可能清除生成信息。'));
-  info.append(node('p', 'resource-note', references.length
-    ? `${data.metadataType || '图站参考标签'} · 参考标签不是原图的生成提示词，也不会自动覆盖画风串草稿。`
-    : `${data.metadataType || '图片元数据'} · 可逐项复制，勾选控制「复制所选」。`));
-  const selection = node('div', 'prompt-selection');
-  const content = node('div');
-  const artistMatches = node('div');
-  content.append(artistMatches);
-  const selected = {};
-  const artistSampleState = new Map();
-  let preparingFavorite = false;
-  const hasActual = Boolean(data.actualPrompt || data.actualNegativePrompt
-    || data.actualCharacters?.length || data.actualNegativeCharacters?.length);
-  selected.actual = hasActual && Boolean(restored?.actual);
-  const groups = [
-    ['positive', '正向提示词', Boolean(data.prompt || data.actualPrompt)],
-    ['negative', '负向提示词', Boolean(data.negativePrompt || data.actualNegativePrompt)],
-    ['characters', '角色提示词和位置', Boolean(data.characters?.length || data.negativeCharacters?.length || data.actualCharacters?.length || data.actualNegativeCharacters?.length)],
-    ['settings', '模型与生成设置', Boolean(data.parameters || data.model)],
-    ['seed', '种子', data.parameters?.seed !== undefined],
-  ];
-  for (const [key, label, available] of groups) {
-    const checked = available && (restored ? Boolean(restored[key]) : true);
-    selected[key] = checked;
-    if (available) selection.append(checkOption(label, checked, (next) => { selected[key] = next; renderFields(); }));
-  }
-  if (hasActual) {
-    selection.append(checkOption('使用随机展开后的实际提示词', selected.actual, (checked) => {
-      selected.actual = checked;
-      renderFields();
-    }));
-  }
-  if (selection.childElementCount) info.append(selection);
-  info.append(content);
-  let koreanResults = [];
-  let importedResults = [];
-  let koreanLoading = true;
-  let artistCatalog = promptArtistCatalog(koreanResults, { loading: koreanLoading });
-  function refreshArtistMatches() {
-    if (revision !== screenRevision) return;
-    const scroll = body.scrollTop;
-    artistCatalog = promptArtistCatalog(koreanResults, { loading: koreanLoading, importedResults });
-    renderArtistMatches();
-    body.scrollTop = scroll;
-  }
-  Promise.allSettled(koreanPacks.map(([id]) => loadKoreanCatalog(id))).then((results) => {
-    koreanResults = results;
-    koreanLoading = false;
-    refreshArtistMatches();
-  });
-  loadSavedNaxDirectory(revision)?.then(() => {
-    if (state.online) refreshArtistMatches();
-  }).catch(() => { /* The bundled and imported catalogs remain available. */ });
-  loadImportedArtistCatalogs().then((results) => {
-    importedResults = results;
-    if (results.length) refreshArtistMatches();
-  });
-  const rawFields = Object.entries(data.metadata || {});
-  if (rawFields.length || data.rawComment) {
-    const disclosure = node('section', 'metadata-disclosure');
-    const details = node('details', 'metadata-details raw-metadata');
-    details.append(node('summary', '', '原始元数据'));
-    const raw = node('dl', 'metadata-facts');
-    for (const [key, value] of rawFields) appendCopyFact(raw, key, value, '空值', true);
-    if (raw.childElementCount) details.append(raw);
-    disclosure.append(details, button('复制原始数据', 'soft compact metadata-disclosure-copy',
-      () => copy(rawFields.length ? data.metadata : data.rawComment)));
-    info.append(disclosure);
-  }
-
-  function showArtistSample(card) {
-    const scroll = body.scrollTop;
-    const stateForReturn = { ...selected };
-    showCard(card, 0, () => showPromptImport(data, {
-      back, galleryItem, resourcePhoto,
-      promptState: stateForReturn,
-      promptScroll: scroll,
-    }));
-  }
-
-  function addRecognizedArtists(items, targetModel) {
-    const scroll = body.scrollTop;
-    const stateForReturn = { ...selected };
-    const cards = items.map((item) => preferredArtistRecord(item.candidates, targetModel)?.card)
-      .filter(Boolean);
-    if (!cards.length) {
-      toast('没有可加入的库内正向画师。');
-      return;
-    }
-    openArtistChainWorkbench({
-      defaultModel: targetModel || null,
-      initialArtists: cards,
-      back: () => showPromptImport(data, {
-        back, galleryItem, resourcePhoto,
-        promptState: stateForReturn,
-        promptScroll: scroll,
-      }),
-    });
-  }
-
-  function renderArtistMatches() {
-    const recognized = selectedGeneration(data, {
-      positive: true, negative: true, characters: true, settings: true, actual: selected.actual,
-    });
-    artistMatches.replaceChildren(renderPromptArtistUsage(
-      recognized, artistCatalog, showArtistSample, artistSampleState, addRecognizedArtists));
-  }
-
-  function promptReturnState() {
-    return {
-      ...selected,
-      references: references.filter((tag) => selectedReferences.has(tag.name)).map((tag) => tag.name),
-    };
-  }
-
-  function reopenPrompt(scroll = body.scrollTop) {
-    showPromptImport(data, {
-      back, galleryItem, resourcePhoto,
-      promptState: promptReturnState(),
-      promptScroll: scroll,
-      referenceTags: references,
-      referenceSource,
-      referenceSite,
-      referenceSelected: [...selectedReferences],
-    });
-  }
-
-  function renderReferences() {
-    if (!references.length) return;
-    const section = node('section', 'reference-tag-panel');
-    section.append(
-      node('h3', '', '参考标签'),
-      node('p', 'resource-note', `${referenceSource ? `${referenceSource} · ` : ''}请选择要带走的原始标签；不会当成原图生图提示词。`),
-    );
-    const list = node('div', 'reference-tag-list');
-    references.forEach((tag) => {
-      const kind = tagGalleryKindInfo(tag.kind);
-      const searchTag = PocketSources.tagGalleryTag(tag.name);
-      const row = node('div', 'reference-tag-row');
-      const choice = node('label', 'reference-tag-choice');
-      const checkbox = node('input');
-      checkbox.type = 'checkbox';
-      checkbox.checked = selectedReferences.has(tag.name);
-      checkbox.addEventListener('change', () => {
-        if (checkbox.checked) selectedReferences.add(tag.name);
-        else selectedReferences.delete(tag.name);
-        renderFields();
-      });
-      choice.append(checkbox, node('span', 'reference-tag-name', tag.name),
-        node('span', 'tag-gallery-tag-category', kind.label));
-      tagDictionaryAppend(choice, tag.name, () => row.isConnected);
-      const controls = node('div', 'reference-tag-actions');
-      controls.append(
-        button('复制原标签', 'soft compact', () => copy(tag.name)),
-        button('用它搜图', 'soft compact', () => {
-          const scroll = body.scrollTop;
-          showTagGalleries(searchTag, () => reopenPrompt(scroll), referenceSite);
-        }),
-      );
-      if (kind.section) {
-        controls.append(button('在词库搜索', 'soft compact', () => {
-          const scroll = body.scrollTop;
-          searchTagGalleryInLibrary(tag, () => reopenPrompt(scroll), '返回参考标签');
-        }));
-      }
-      if (kind.section === 'artist') {
-        controls.append(button('加入画风串', 'soft compact', () => {
-          const scroll = body.scrollTop;
-          openArtistChainWorkbench({
-            defaultModel: null,
-            initialTag: tag.name,
-            back: () => reopenPrompt(scroll),
-          });
-        }));
-      }
-      row.append(choice, controls);
-      list.append(row);
-    });
-    section.append(list);
-    content.append(section);
-  }
-
-  function renderFields() {
-    const scroll = body.scrollTop;
-    const generation = selectedGeneration(data, selected);
-    content.replaceChildren(artistMatches);
-    renderArtistMatches();
-    renderReferences();
-    addCopyablePrompt(content, '正向提示词', generation.prompt);
-    addCopyablePrompt(content, '负向提示词', generation.negativePrompt);
-    renderCharacterPrompts(content, generation.characters, generation.negativeCharacters);
-    const params = selectedGeneration(data, { settings: true, seed: true }).parameters;
-    if (data.model && params.model == null) params.model = data.model;
-    if (hasGeneration) {
-      const settings = node('section', 'tool-section');
-      const parameterHeading = node('div', 'online-pack-heading');
-      parameterHeading.append(node('h2', '', '生成参数'));
-      if (Object.keys(params).length) parameterHeading.append(button('复制全部生成参数', 'soft compact', () => copy(params)));
-      settings.append(parameterHeading);
-      const facts = node('dl', 'metadata-facts');
-      const model = novelAiModelLabel(params.model || params.model_name, params.model_hash);
-      appendCopyFact(facts, '模型', model);
-      for (const key of new Set(['sampler', 'steps', ...Object.keys(parameterLabels), ...Object.keys(params)])) {
-        if (key === 'model' && params.model === model) continue;
-        const label = key === 'model' ? '原始模型标识' :
-          Object.prototype.hasOwnProperty.call(parameterLabels, key) ? parameterLabels[key] : key;
-        appendCopyFact(facts, label,
-          Object.prototype.hasOwnProperty.call(params, key) ? params[key] : undefined,
-          ['sampler', 'steps'].includes(key) ? '原图未记录' : undefined, true);
-      }
-      settings.append(facts);
-      content.append(settings);
-    }
-    const json = JSON.stringify(generation, null, 2);
-    const chosen = groups.some(([key]) => selected[key]);
-    const chosenReferences = references.filter((tag) => selectedReferences.has(tag.name));
-    const referenceOnly = references.length > 0 && !hasGeneration;
-    actions.replaceChildren(button(galleryItem ? '返回原图' : sample ? '返回样图'
-      : references.length ? '返回标签来源' : '另选原图', 'soft',
-      back || (sample || references.length ? closeScreen : readImagePrompts)));
-    const copySelection = button(hasGeneration ? '复制所选' : '复制所选参考标签', 'soft', () =>
-      copy(referenceOnly
-        ? chosenReferences.map((tag) => tag.name).join(' ')
-        : json));
-    const save = button(preparingFavorite ? '正在准备封面…' : '收藏所选', 'primary', async () => {
-      if (preparingFavorite) return;
-      if (new Blob([json]).size > 2 * 1024 * 1024 || generation.prompt.length > 16000) { toast('所选信息超过收藏上限，请保留原图。'); return; }
-      const note = generation.negativePrompt && generation.negativePrompt.length < 7900
-        ? '负向提示词：\n' + generation.negativePrompt : '已附带所选生成信息。';
-      const source = resourcePhoto || {};
-      preparingFavorite = true;
-      save.disabled = true;
-      save.textContent = '正在准备封面…';
-      const cover = await promptFavoriteCover(data.preview, galleryItem, source.preview);
-      if (revision !== screenRevision) return;
-      showEditor({ section: 'knowledge', kind: 'general', title: sample ? '样图生成信息' : '原图生成信息',
-        prompt: generation.prompt, note, photos: cover ? [{ url: cover, label: '图片预览' }] : [], generation: json,
-        source: source.source, sourceUrl: source.sourceUrl });
-      if (!cover) toast('小预览暂不可用，可在编辑页选择配图。');
-    });
-    copySelection.disabled = referenceOnly ? !chosenReferences.length : !chosen;
-    save.disabled = !chosen || preparingFavorite;
-    if (hasGeneration && !references.length) {
-      const positivePrompt = (selected.actual ? data.actualPrompt : data.prompt)
-        || data.prompt || data.actualPrompt || '';
-      const finderTags = parsedPromptReferenceTags(positivePrompt);
-      if (finderTags.length) {
-        actions.append(button('选取正向词找图', 'soft', () => {
-          const scroll = body.scrollTop;
-          const stateForReturn = { ...selected };
-          openTagGalleryReferenceTool(finderTags, '原图正向提示词', () => showPromptImport(data, {
-            back, galleryItem, resourcePhoto,
-            promptState: stateForReturn,
-            promptScroll: scroll,
-          }));
-        }));
-      }
-    }
-    if (references.length) {
-      const findImages = button('用勾选参考标签找图', 'soft', () => {
-        const value = chosenReferences
-          .map((tag) => PocketSources.tagGalleryTag(tag.name))
-          .filter(Boolean)
-          .join(' ');
-        if (!value) {
-          toast('请先勾选参考标签。');
-          return;
-        }
-        const scroll = body.scrollTop;
-        showTagGalleries(value, () => reopenPrompt(scroll), referenceSite);
-      });
-      findImages.disabled = !chosenReferences.length;
-      actions.append(findImages);
-    }
-    actions.append(copySelection);
-    if (hasGeneration) actions.append(save);
-    body.scrollTop = scroll;
-  }
-  renderFields();
-  if (restoredScroll) {
-    body.scrollTop = restoredScroll;
-    requestAnimationFrame(() => {
-      if (revision === screenRevision) body.scrollTop = restoredScroll;
-    });
-  }
 }
 
 let updateOffer = null;
@@ -4808,6 +2696,9 @@ function showTools(initialUpdate) {
 byId('tools').addEventListener('click', showTools);
 byId('gallery').addEventListener('click', () => showGallery());
 byId('add').addEventListener('click', () => showEditor());
+byId('theme-trigger').addEventListener('click', showThemePicker);
+byId('artist-dock-open').addEventListener('click', () => window.PocketApp.chain.openArtistChainWorkbench());
+byId('artist-dock-copy').addEventListener('click', window.PocketApp.chain.copyCurrentArtistChain);
 byId('close').addEventListener('click', goBack);
 byId('personal').addEventListener('click', () => chooseMode('personal'));
 byId('online').addEventListener('click', () => chooseMode('online'));
@@ -4815,13 +2706,15 @@ byId('nav').addEventListener('click', (event) => {
   const tab = event.target.closest('button[data-section]');
   if (tab) chooseSection(tab.dataset.section);
 });
-let queryTimer;
+const renderQueryList = debounce(renderList, 80);
 query.addEventListener('input', () => {
   resetPage();
-  clearTimeout(queryTimer);
-  queryTimer = setTimeout(renderList, 80);
+  renderQueryList();
 });
 screen.addEventListener('cancel', (event) => { event.preventDefault(); goBack(); });
+screen.addEventListener('click', (event) => {
+  if (event.target === screen && (screen.classList.contains('theme-open') || screen.classList.contains('artist-chain-screen'))) goBack();
+});
 window.PocketBack = () => {
   if (screen.open) { goBack(); return true; }
   if (state.galleryFocus) { setGalleryLayout(false); render(); return true; }
@@ -4830,6 +2723,7 @@ window.PocketBack = () => {
 };
 window.PocketForeground = checkAutomaticUpdate;
 
+state.galleryPacks = readCachedGalleryPacks() || galleryPacksFallback;
 ensureKorean();
 render();
 loadGalleryPacks();

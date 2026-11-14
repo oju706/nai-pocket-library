@@ -8,6 +8,13 @@
 
 「在 App 内打开官网」会在独立的网页页签保留站点自己的搜索、登录和浏览方式。Gelbooru 的图库接口需要用户 ID 和 API Key，直接打开官网可使用站点自己的访问方式。来源选择参考 [NAI Launcher v4.3.1](https://github.com/Aaalice233/Aaalice_NAI_Launcher/releases/tag/v4.3.1)。
 
+## 1.3.19
+
+- 右上角打开主题色板，可选 Gemini 原型的 10 套配色和原版蓝灰。彩色主题的画师卡有切角、票孔与撕线，手机画师页底部可直接打开画风串或复制当前配方。
+- 画风串支持锁定倍率、停用、平均倍率归一到 1，以及同模型 A/B/C 草稿对比。原图参数页可按原倍率把主正向提示词里的已识别画师加入工作台。
+- 原图参数页新增「检索提示词里的 TAG」，可查看命中的画师、角色、作品和画面知识，逐个复制原标签。
+- Danbooru 图库的标签可直接收藏。画师归入「我的词库 → 画师」，角色和作品归入「同人角色」，通用和元数据归入「画面提示词知识」。已安装词典时显示中文译名，保存和复制保留原标签。
+
 ## 1.3.18
 
 - 从「工具 → 中文标签词典」或 D 站图库安装 ffdkj 的中英词典。首次下载约 25 MB，安装后可离线查词。 [词典发布页](https://github.com/ffdkj/ffdkj-Danbooru_Tag-Chinese-English-Translation-Table/releases/tag/v2026-11-01)
@@ -102,7 +109,7 @@
 
 ## 构建与发布
 
-当前版本为 1.3.18（versionCode 22），包名为 `app.nai.pocketlibrary`。构建使用 Windows 上的 PowerShell、JDK 17、Android SDK Platform 35 和 Build Tools 35.0.0。
+当前版本为 1.3.19（versionCode 23），包名为 `app.nai.pocketlibrary`。构建使用 Windows 上的 PowerShell、JDK 17、Android SDK Platform 35 和 Build Tools 35.0.0。
 
 脚本使用下面的便携工具目录。可用 `-ToolCache` 指定目录位置。
 
@@ -129,7 +136,7 @@ pwsh -NoProfile -File .\build.ps1
 
 页面使用统一条目结构，含分类、名称、模型、提示词、备注、预览和来源。资源转换集中在 `web/sources.js`；网络和文件处理各自独立，方便新增来源。详见 [扩展约定](docs/扩展约定.md)。当前不支持用户安装第三方插件。
 
-后续可增加画风串草稿，从多个画师标签组合权重，按模型保存并预览提示词。再允许从图库原图或角色库带入提示词与参数，最后接入由用户配置的 NovelAI 生图服务。
+画风串工作台按模型保存草稿，可从原图导入已识别的画师倍率。后续可在这套工作流程上接入由用户配置的 NovelAI 生图服务。
 
 ## 验证范围
 

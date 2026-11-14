@@ -157,6 +157,9 @@ public final class MainActivity extends Activity {
         try {
             if ("/index.html".equals(path)) return response("text/html", getAssets().open("index.html"), false);
             if ("/style.css".equals(path)) return response("text/css", getAssets().open("style.css"), false);
+            if ("/core-state.js".equals(path)) return response("text/javascript", getAssets().open("core-state.js"), false);
+            if ("/chain-workbench.js".equals(path)) return response("text/javascript", getAssets().open("chain-workbench.js"), false);
+            if ("/image-parser.js".equals(path)) return response("text/javascript", getAssets().open("image-parser.js"), false);
             if ("/app.js".equals(path)) return response("text/javascript", getAssets().open("app.js"), false);
             if ("/sources.js".equals(path)) return response("text/javascript", getAssets().open("sources.js"), false);
             if ("/gallery.css".equals(path)) return response("text/css", getAssets().open("gallery.css"), false);

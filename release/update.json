@@ -1,8 +1,8 @@
 {
-  "versionCode": 22,
-  "versionName": "1.3.18",
+  "versionCode": 23,
+  "versionName": "1.3.19",
   "file": "NAI-Pocket-Library.apk",
-  "bytes": 1181068,
-  "sha256": "0500822cd5280e2238b00537b71372877861cd0b2fcfbdddc48a476af8a8b06b",
-  "notes": "新增 ffdkj 中文标签词典。从「工具 → 中文标签词典」下载约 25 MB 后可离线查看 33 万余条释义。D 站、词库和画风串可显示中文，复制、保存和导出仍使用原词。"
+  "bytes": 1197657,
+  "sha256": "c97e5292c6e0aab613520eeabbf7afd6ce25c3a6ea7ff806c5e04242e6a51441",
+  "notes": "新增 Gemini 原型的 10 套配色、票券式画师卡和手机底部画风串。工作台支持锁定倍率、归一化、三稿对比和导入原图倍率。原图可查词库 TAG，D 站标签可分类收藏并显示中文。"
 }

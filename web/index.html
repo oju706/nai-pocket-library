@@ -12,6 +12,9 @@
   <link rel="stylesheet" href="./tag-gallery.css">
   <link rel="stylesheet" href="./online-pack.css">
   <script src="./sources.js" defer></script>
+  <script src="./core-state.js" defer></script>
+  <script src="./chain-workbench.js" defer></script>
+  <script src="./image-parser.js" defer></script>
   <script src="./app.js" defer></script>
   <script src="./gallery.js" defer></script>
   <script src="./tag-gallery.js" defer></script>
@@ -35,7 +38,10 @@
   <div class="shell">
     <header class="topbar">
       <div class="brand"><span class="brand-mark"><svg><use href="#i-mark"/></svg></span><span>NAI 口袋词库</span></div>
-      <div class="top-actions"><button id="tools" class="soft compact" type="button">工具</button><button id="add" class="primary compact" type="button"><svg><use href="#i-plus"/></svg>新增</button></div>
+      <div class="top-actions">
+        <button id="theme-trigger" class="theme-picker" type="button" aria-label="选择界面配色" aria-haspopup="dialog">原版蓝灰</button>
+        <button id="tools" class="soft compact" type="button">工具</button><button id="add" class="primary compact" type="button"><svg><use href="#i-plus"/></svg>新增</button>
+      </div>
     </header>
     <main id="main">
       <div id="update-notice" class="update-notice" aria-live="polite" hidden></div>
@@ -59,12 +65,19 @@
       <div id="list-meta" class="list-meta" aria-live="polite"></div>
       <div id="results"></div>
     </main>
-    <nav id="nav" class="nav" aria-label="词库分类">
-      <button type="button" data-section="character"><svg><use href="#i-character"/></svg>同人角色</button>
-      <button type="button" data-section="artist"><svg><use href="#i-artist"/></svg>画师</button>
-      <button type="button" data-section="knowledge"><svg><use href="#i-book"/></svg>画面提示词知识</button>
-      <button type="button" id="gallery"><svg><use href="#i-image"/></svg>图库</button>
-    </nav>
+    <footer>
+      <div class="artist-dock" aria-label="画风串快捷操作">
+        <span id="artist-dock-status" class="artist-dock-status"></span>
+        <button id="artist-dock-open" class="soft compact" type="button">画风串</button>
+        <button id="artist-dock-copy" class="primary compact" type="button">复制串</button>
+      </div>
+      <nav id="nav" class="nav" aria-label="词库分类">
+        <button type="button" data-section="character"><svg><use href="#i-character"/></svg>同人角色</button>
+        <button type="button" data-section="artist"><svg><use href="#i-artist"/></svg>画师</button>
+        <button type="button" data-section="knowledge"><svg><use href="#i-book"/></svg>画面提示词知识</button>
+        <button type="button" id="gallery"><svg><use href="#i-image"/></svg>图库</button>
+      </nav>
+    </footer>
   </div>
 
   <dialog id="screen" class="screen">
