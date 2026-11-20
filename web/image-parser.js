@@ -1856,11 +1856,84 @@ async function promptFavoriteCover(preview, galleryItem, sampleImage) {
   }
 }
 
+function showPromptPaste(initial = null, { back = null, promptScroll = 0 } = {}) {
+  openScreen('使用已复制的提示词', back);
+  const restoredScroll = Number.isFinite(promptScroll) ? Math.max(0, promptScroll) : 0;
+  const positive = textInput('textarea', initial?.positive, '粘贴正向提示词', 16000);
+  const negative = textInput('textarea', initial?.negative, '可选：粘贴负向提示词', 16000);
+  const status = node('p', 'resource-note codex-paste-status',
+    '从法典复制提示词后，粘贴到对应的输入框。');
+  status.setAttribute('aria-live', 'polite');
+  const revision = screenRevision;
+  function pasteButton(target, channel) {
+    const control = button(`粘贴${channel}`, 'soft', async () => {
+      if (!navigator.clipboard?.readText) {
+        status.textContent = '请在输入框手动粘贴。';
+        target.focus();
+        return;
+      }
+      control.disabled = true;
+      try {
+        const text = await navigator.clipboard.readText();
+        if (revision !== screenRevision) return;
+        if (!text.trim()) {
+          status.textContent = '剪贴板里没有可用的文本。';
+        } else if (text.length > target.maxLength) {
+          status.textContent = `剪贴板文本超过 ${target.maxLength} 字，请分段粘贴。`;
+        } else {
+          target.value = text;
+          status.textContent = `已粘贴${channel}提示词。`;
+        }
+      } catch {
+        if (revision !== screenRevision) return;
+        status.textContent = '未能读取剪贴板，请在输入框手动粘贴。';
+        target.focus();
+      } finally {
+        control.disabled = false;
+      }
+    });
+    return control;
+  }
+  const form = node('div', 'form codex-paste-form');
+  form.append(field('正向提示词', positive), pasteButton(positive, '正向'),
+    field('负向提示词（可选）', negative), pasteButton(negative, '负向'), status);
+  body.append(form);
+  actions.append(button('识别并联动已有功能', 'primary', () => {
+    if (!positive.value.trim() && !negative.value.trim()) {
+      status.textContent = '请先粘贴正向或负向提示词。';
+      positive.focus();
+      return;
+    }
+    const stateForReturn = {
+      positive: positive.value,
+      negative: negative.value,
+      scroll: body.scrollTop,
+    };
+    showPromptImport({
+      found: true,
+      pasted: true,
+      pastedSource: '法典图鉴 · 手动粘贴',
+      metadataType: '法典图鉴 · 手动粘贴',
+      prompt: stateForReturn.positive,
+      negativePrompt: stateForReturn.negative,
+      characters: [],
+      negativeCharacters: [],
+      metadata: {},
+    }, {
+      back: () => showPromptPaste(stateForReturn, { back, promptScroll: stateForReturn.scroll }),
+    });
+  }));
+  if (restoredScroll) {
+    requestAnimationFrame(() => { body.scrollTop = restoredScroll; });
+  }
+}
+
 function showPromptImport(data, {
   back = null, galleryItem = null, resourcePhoto = null, promptState = null, promptScroll = 0,
   referenceTags = [], referenceSource = '', referenceSite = 'danbooru', referenceSelected = [],
 } = {}) {
   const sample = Boolean(resourcePhoto);
+  const pasted = data.pasted === true;
   const references = (Array.isArray(referenceTags) ? referenceTags : [])
     .map((tag) => typeof tag === 'string' ? { name: tag, kind: '' } : tag)
     .filter((tag) => tag && String(tag.name || '').trim())
@@ -1868,6 +1941,7 @@ function showPromptImport(data, {
   const selectedReferences = new Set((Array.isArray(referenceSelected) ? referenceSelected : [])
     .map((value) => String(value).trim()).filter(Boolean));
   openScreen(sample ? '样图提示词与参数'
+    : pasted ? '粘贴提示词与识别结果'
     : references.length && !data.found ? '图站参考标签' : '原图提示词与参数', back);
   const revision = screenRevision;
   const restored = promptState && typeof promptState === 'object' ? promptState : null;
@@ -1889,11 +1963,11 @@ function showPromptImport(data, {
     }
   });
   let fallbackPreview = null;
-  if (!resourcePhoto?.preview && smallPromptPreview(data.preview)) {
+  if (!pasted && !resourcePhoto?.preview && smallPromptPreview(data.preview)) {
     fallbackPreview = node('img', 'original-preview');
     fallbackPreview.src = data.preview;
     fallbackPreview.alt = '所选原图预览';
-  } else if (!resourcePhoto?.preview && galleryItem) {
+  } else if (!pasted && !resourcePhoto?.preview && galleryItem) {
     fallbackPreview = node('img', 'original-preview');
     fallbackPreview.src = galleryImageUrl(galleryItem, true);
     fallbackPreview.alt = '图库小预览';
@@ -1910,7 +1984,7 @@ function showPromptImport(data, {
   const info = node('div', 'prompt-import-info');
   layout.append(media, info);
   body.append(layout);
-  if ((window.Pocket || desktopApp && smallPromptPreview(data.preview))
+  if (!pasted && (window.Pocket || desktopApp && smallPromptPreview(data.preview))
     && !galleryItem && !sample && !references.length) info.append(libraryButton);
   if (sample) {
     const source = resourcePhoto;
@@ -1933,7 +2007,9 @@ function showPromptImport(data, {
   if (!availablePrompt) info.append(node('p', 'detail-note', data.message || '未读到提示词。截图和转存可能清除生成信息。'));
   info.append(node('p', 'resource-note', references.length
     ? `${data.metadataType || '图站参考标签'} · 参考标签不是原图的生成提示词，也不会自动覆盖画风串草稿。`
-    : `${data.metadataType || '图片元数据'} · 可逐项复制，勾选控制「复制所选」。`));
+    : `${data.metadataType || '图片元数据'} · ${pasted
+      ? '可识别画师与 TAG；复制和收藏使用你粘贴的英文原词。'
+      : '可逐项复制，勾选控制「复制所选」。'}`));
   const selection = node('div', 'prompt-selection');
   const content = node('div');
   const artistMatches = node('div');
@@ -2162,7 +2238,7 @@ function showPromptImport(data, {
     renderCharacterPrompts(content, generation.characters, generation.negativeCharacters);
     const params = selectedGeneration(data, { settings: true, seed: true }).parameters;
     if (data.model && params.model == null) params.model = data.model;
-    if (hasGeneration) {
+    if (hasGeneration && !pasted) {
       const settings = node('section', 'tool-section');
       const parameterHeading = node('div', 'online-pack-heading');
       parameterHeading.append(node('h2', '', '生成参数'));
@@ -2186,9 +2262,10 @@ function showPromptImport(data, {
     const chosen = groups.some(([key]) => selected[key]);
     const chosenReferences = references.filter((tag) => selectedReferences.has(tag.name));
     const referenceOnly = references.length > 0 && !hasGeneration;
-    actions.replaceChildren(button(galleryItem ? '返回原图' : sample ? '返回样图'
+    actions.replaceChildren(button(pasted ? '返回粘贴内容'
+      : galleryItem ? '返回原图' : sample ? '返回样图'
       : references.length ? '返回标签来源' : '另选原图', 'soft',
-      back || (sample || references.length ? closeScreen : readImagePrompts)));
+      back || (pasted || sample || references.length ? closeScreen : readImagePrompts)));
     const copySelection = button(hasGeneration ? '复制所选' : '复制所选参考标签', 'soft', () =>
       copy(referenceOnly
         ? chosenReferences.map((tag) => tag.name).join(' ')
@@ -2198,16 +2275,17 @@ function showPromptImport(data, {
       if (new Blob([json]).size > 2 * 1024 * 1024 || generation.prompt.length > 16000) { toast('所选信息超过收藏上限，请保留原图。'); return; }
       const note = generation.negativePrompt && generation.negativePrompt.length < 7900
         ? '负向提示词：\n' + generation.negativePrompt : '已附带所选生成信息。';
-      const source = resourcePhoto || {};
+      const source = pasted ? { source: data.pastedSource || '法典图鉴 · 手动粘贴' } : resourcePhoto || {};
       preparingFavorite = true;
       save.disabled = true;
       save.textContent = '正在准备封面…';
       const cover = await promptFavoriteCover(data.preview, galleryItem, source.preview);
       if (revision !== screenRevision) return;
-      showEditor({ section: 'knowledge', kind: 'general', title: sample ? '样图生成信息' : '原图生成信息',
+      showEditor({ section: 'knowledge', kind: 'general',
+        title: pasted ? '粘贴提示词' : sample ? '样图生成信息' : '原图生成信息',
         prompt: generation.prompt, note, photos: cover ? [{ url: cover, label: '图片预览' }] : [], generation: json,
-        source: source.source, sourceUrl: source.sourceUrl });
-      if (!cover) toast('小预览暂不可用，可在编辑页选择配图。');
+        source: source.source, sourceUrl: source.sourceUrl }, pasted ? () => reopenPrompt() : null);
+      if (!cover && !pasted) toast('小预览暂不可用，可在编辑页选择配图。');
     });
     copySelection.disabled = referenceOnly ? !chosenReferences.length : !chosen;
     save.disabled = !chosen || preparingFavorite;
@@ -2219,7 +2297,8 @@ function showPromptImport(data, {
         actions.append(button('选取正向词找图', 'soft', () => {
           const scroll = body.scrollTop;
           const stateForReturn = { ...selected };
-          openTagGalleryReferenceTool(finderTags, '原图正向提示词', () => showPromptImport(data, {
+          openTagGalleryReferenceTool(finderTags, pasted ? '粘贴的正向提示词' : '原图正向提示词',
+            () => showPromptImport(data, {
             back, galleryItem, resourcePhoto,
             promptState: stateForReturn,
             promptScroll: scroll,
@@ -2258,5 +2337,5 @@ function showPromptImport(data, {
 
 window.PocketApp = window.PocketApp || {};
 window.PocketApp.image = Object.freeze({
-  readImagePrompts, showPromptImport, extractPromptTags, novelAiModelLabel,
+  readImagePrompts, showPromptImport, showPromptPaste, extractPromptTags, novelAiModelLabel,
 });

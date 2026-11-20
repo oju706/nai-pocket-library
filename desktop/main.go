@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -30,10 +31,14 @@ import (
 
 const (
 	appID       = "nai-pocket-library.desktop"
-	appVersion  = "1.3.29"
+	appVersion  = "1.3.30"
 	desktopPort = 17619
 
-	contentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+	desktopWindowQuery        = "window"
+	desktopWindowMarkerLength = 32
+	desktopReopenHeader       = "X-NAI-Pocket-Reopen"
+
+	contentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; frame-src https://novelai.quicktagcloud.com; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 	maxHeaderBytes        = 64 * 1024
 	maxErrorBody          = 64 * 1024
 )
@@ -117,7 +122,7 @@ func main() {
 		fatal("自选本地端口只能与 -no-browser 一起使用")
 	}
 	host := desktopAddress(*port)
-	homeURL := "http://" + host + "/index.html"
+	homeURL := desktopHomeURL(*port, "")
 
 	webRoot, err := resolveWebRoot(*webFlag)
 	if err != nil {
@@ -135,14 +140,14 @@ func main() {
 	if !*noBrowser && *webFlag == "" {
 		updater = newWindowsUpdater(cacheRoot)
 	}
-	listener, existing, err := acquireListener(host, *port, updater)
+	listener, existing, existingWindowMarker, err := acquireListener(host, *port, updater, !*noBrowser)
 	if err != nil {
 		fatal("%v；不会打开其他程序的页面", err)
 	}
 	if existing {
 		log.Printf("检测到同一 App 已在运行，重新打开 %s", homeURL)
 		if !*noBrowser {
-			if _, err := openApplicationWindow(cacheRoot, homeURL, nil); err != nil {
+			if _, err := openApplicationWindow(cacheRoot, *port, nil, existingWindowMarker); err != nil {
 				log.Printf("无法重新打开窗口：%v；请手动访问 %s", err, homeURL)
 			}
 		}
@@ -151,6 +156,15 @@ func main() {
 
 	app := newApplication(webRoot, cacheRoot, *port)
 	app.updater = updater
+	if !*noBrowser {
+		if marker, markerErr := newDesktopWindowMarker(); markerErr == nil {
+			if err := app.window.setMarker(marker); err != nil {
+				log.Printf("无法启用独立窗口跟踪：%v", err)
+			}
+		} else {
+			log.Printf("无法创建独立窗口标记：%v", markerErr)
+		}
+	}
 	if updater != nil {
 		if next := updater.activeExecutable(); next != "" && !isCurrentExecutable(next) {
 			command := exec.Command(next)
@@ -186,7 +200,7 @@ func main() {
 	log.Printf("NAI 口袋词库 %s 正在监听 %s", appVersion, homeURL)
 	var browserDone <-chan struct{}
 	if !*noBrowser {
-		browserDone, err = openApplicationWindow(cacheRoot, homeURL, &app.window)
+		browserDone, err = openApplicationWindow(cacheRoot, *port, &app.window, "")
 		if err != nil {
 			log.Printf("无法自动打开浏览器：%v；请手动访问 %s", err, homeURL)
 		}
@@ -276,24 +290,58 @@ func desktopAddress(port int) string {
 	return "127.0.0.1:" + strconv.Itoa(port)
 }
 
-func acquireListener(host string, port int, updater *windowsUpdater) (net.Listener, bool, error) {
+func desktopHomeURL(port int, marker string) string {
+	target := url.URL{
+		Scheme: "http",
+		Host:   desktopAddress(port),
+		Path:   "/index.html",
+	}
+	if validDesktopWindowMarker(marker) {
+		query := target.Query()
+		query.Set(desktopWindowQuery, marker)
+		target.RawQuery = query.Encode()
+	}
+	return target.String()
+}
+
+func newDesktopWindowMarker() (string, error) {
+	value := make([]byte, desktopWindowMarkerLength/2)
+	if _, err := rand.Read(value); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(value), nil
+}
+
+func validDesktopWindowMarker(marker string) bool {
+	if len(marker) != desktopWindowMarkerLength {
+		return false
+	}
+	for _, char := range marker {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func acquireListener(host string, port int, updater *windowsUpdater, reopen bool) (net.Listener, bool, string, error) {
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		listener, err := net.Listen("tcp4", host)
 		if err == nil {
-			return listener, false, nil
+			return listener, false, "", nil
 		}
-		if isAppRunning(host, port, updater) {
-			return nil, true, nil
+		if running, marker := isAppRunning(host, port, updater, reopen); running {
+			return nil, true, marker, nil
 		}
 		if time.Now().After(deadline) {
-			return nil, false, fmt.Errorf("无法绑定 %s", host)
+			return nil, false, "", fmt.Errorf("无法绑定 %s", host)
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
 }
 
-func isAppRunning(host string, port int, updater *windowsUpdater) bool {
+func isAppRunning(host string, port int, updater *windowsUpdater, reopen bool) (bool, string) {
 	transport := &http.Transport{
 		Proxy:               nil,
 		DialContext:         (&net.Dialer{Timeout: time.Second}).DialContext,
@@ -314,46 +362,62 @@ func isAppRunning(host string, port int, updater *windowsUpdater) bool {
 
 	request, err := http.NewRequest(http.MethodGet, "http://"+host+"/api/desktop.json", nil)
 	if err != nil {
-		return false
+		return false, ""
+	}
+	if reopen {
+		request.Header.Set(desktopReopenHeader, "1")
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		return false
+		return false, ""
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return false
+		return false, ""
 	}
 	data, err := readLimited(response.Body, maxErrorBody)
 	if err != nil {
-		return false
+		return false, ""
 	}
 	var marker desktopMarker
 	if json.Unmarshal(data, &marker) != nil {
-		return false
+		return false, ""
 	}
 	if marker.App != appID || marker.Port != port {
-		return false
+		return false, ""
 	}
 	if marker.Version != appVersion {
 		if updater != nil {
 			if activation, ok := updater.readActivation(); ok && marker.Version == activation.Manifest.Version {
-				return true
+				if validDesktopWindowMarker(marker.WindowMarker) {
+					return true, marker.WindowMarker
+				}
+				return true, ""
 			}
 		}
 		fatal("当前已运行 Windows %s。关闭旧窗口和旧版程序后，再打开 %s。", marker.Version, appVersion)
 	}
-	return true
+	if validDesktopWindowMarker(marker.WindowMarker) {
+		return true, marker.WindowMarker
+	}
+	return true, ""
 }
 
-func openApplicationWindow(cacheRoot, homeURL string, window *desktopWindow) (<-chan struct{}, error) {
+func openApplicationWindow(cacheRoot string, port int, window *desktopWindow, marker string) (<-chan struct{}, error) {
 	profile := filepath.Join(cacheRoot, "edge-profile")
 	if err := os.MkdirAll(profile, 0o700); err != nil {
 		return nil, err
 	}
+	if window != nil {
+		marker = window.markerValue()
+	}
+	if !validDesktopWindowMarker(marker) {
+		marker = ""
+	}
+	appURL := desktopHomeURL(port, marker)
 	if edge := findEdge(); edge != "" {
 		command := exec.Command(edge,
-			"--app="+homeURL,
+			"--app="+appURL,
 			"--user-data-dir="+profile,
 			"--no-first-run",
 			"--no-default-browser-check",
@@ -363,26 +427,23 @@ func openApplicationWindow(cacheRoot, homeURL string, window *desktopWindow) (<-
 		if err := command.Start(); err != nil {
 			log.Printf("Edge 独立窗口启动失败，改用默认浏览器：%v", err)
 		} else {
+			_ = command.Process.Release()
 			if window != nil {
-				window.setPID(command.Process.Pid)
+				return window.trackWindows(), nil
 			}
-			done := make(chan struct{})
-			go func() {
-				_ = command.Wait()
-				if window != nil {
-					window.setPID(0)
-				}
-				close(done)
-			}()
-			return done, nil
+			return nil, nil
 		}
 	}
 
-	command := exec.Command("rundll32.exe", "url.dll,FileProtocolHandler", homeURL)
+	if window != nil {
+		_ = window.setMarker("")
+	}
+	command := exec.Command("rundll32.exe", "url.dll,FileProtocolHandler", desktopHomeURL(port, ""))
 	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	if err := command.Start(); err != nil {
 		return nil, err
 	}
+	_ = command.Process.Release()
 	return nil, nil
 }
 
@@ -453,6 +514,10 @@ func (app *application) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		writer.WriteHeader(http.StatusFound)
 		return
 	case "/api/desktop.json":
+		if request.Header.Get(desktopReopenHeader) == "1" && !app.window.expectReopen() {
+			writeAPIFailure(writer, request, http.StatusServiceUnavailable, "本地服务正在退出，请稍后重试。")
+			return
+		}
 		windowEnabled, windowCompact := app.window.status()
 		marker := desktopMarker{
 			App:           appID,
@@ -462,6 +527,7 @@ func (app *application) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			UpdateEnabled: app.updater != nil,
 			WindowEnabled: windowEnabled,
 			WindowCompact: windowCompact,
+			WindowMarker:  app.window.markerValue(),
 		}
 		data, _ := json.Marshal(marker)
 		headers.Set("Cache-Control", "no-store")
@@ -613,6 +679,7 @@ type desktopMarker struct {
 	UpdateEnabled bool   `json:"updateEnabled"`
 	WindowEnabled bool   `json:"windowEnabled"`
 	WindowCompact bool   `json:"windowCompact"`
+	WindowMarker  string `json:"windowMarker"`
 }
 
 func (app *application) serveCompactWindow(writer http.ResponseWriter, request *http.Request) {

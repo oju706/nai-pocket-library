@@ -3,6 +3,12 @@
 const byId = (id) => document.getElementById(id);
 const desktopApp = /^http:\/\/127\.0\.0\.1:\d+$/.test(window.location?.origin || '') && !window.Pocket;
 if (desktopApp) document.documentElement.classList.add('pocket-desktop');
+if (desktopApp) {
+  const windowMarker = new URLSearchParams(window.location.search).get('window') || '';
+  if (/^[0-9a-f]{32}$/.test(windowMarker)) {
+    document.title = `${document.title} [nai-window:${windowMarker}]`;
+  }
+}
 const screen = byId('screen');
 const body = byId('screen-body');
 const actions = byId('screen-actions');
@@ -19,7 +25,7 @@ const sections = {
   knowledge: { label: '画面提示词知识', type: '提示词', icon: 'book', subtitle: '收好常用的动作、姿势和构图写法。' },
 };
 const galleryPacksStorageKey = 'pocket-gallery-packs-v1';
-const codexAtlasUrl = 'https://novelai.quicktagcloud.com/?c=suozhang';
+const codexAtlasUrl = 'https://novelai.quicktagcloud.com/?codex=suozhang';
 const galleryPacksFallback = [{
   id: 'korean-gallery',
   title: '韩国画风图库',
@@ -848,6 +854,32 @@ function addArtistCardsToMixer(cards) {
 function openTagGalleryWebsite(url) {
   if (window.Pocket) return native('openTagGalleryWebsite', url).catch((error) => toast(error.message));
   openLink(url);
+}
+
+function openCodexAtlas(back = null) {
+  if (window.Pocket) {
+    openTagGalleryWebsite(codexAtlasUrl);
+    return;
+  }
+  openScreen('法典图鉴 · 作者原站', back, true);
+  screen.classList.add('codex-open');
+  const frame = node('iframe', 'codex-atlas-frame');
+  frame.title = '法典图鉴作者原站';
+  frame.src = codexAtlasUrl;
+  frame.referrerPolicy = 'no-referrer';
+  frame.allow = 'clipboard-write';
+  frame.setAttribute('sandbox', 'allow-scripts allow-same-origin');
+  body.append(frame);
+  actions.append(button('使用已复制的提示词', 'soft', () =>
+    showCodexPromptPaste(() => openCodexAtlas(back))));
+}
+
+function showCodexPromptPaste(back = null) {
+  if (typeof window.PocketApp?.image?.showPromptPaste !== 'function') {
+    toast('提示词导入模块尚未载入，请重新打开 App。');
+    return;
+  }
+  window.PocketApp.image.showPromptPaste(null, { back });
 }
 
 function tagGalleryButtons(getTag, back = null) {
@@ -2014,8 +2046,9 @@ function renderList() {
     if (state.mode === 'online' && state.knowledgeTab === 'references') {
       const codex = node('section', 'codex-entry');
       codex.append(
-        button('法典图鉴 · 打开原站', 'soft compact codex-entry-link', () => openLink(codexAtlasUrl)),
-        node('p', 'codex-entry-note', '在原站看图并复制提示词，再回随机画风工坊粘贴。'),
+        button('法典图鉴 · 打开作者原站', 'soft compact codex-entry-link', () => openCodexAtlas()),
+        button('使用已复制的提示词', 'soft compact', () => showCodexPromptPaste()),
+        node('p', 'codex-entry-note', '直接查看作者原站；复制提示词后可在 App 内粘贴，继续识别画师、TAG、收藏和画风串。'),
       );
       results.append(codex);
     }
@@ -2110,11 +2143,15 @@ function renderList() {
     main.scrollTop = 0;
   }
   if (pages > 1 && state.section !== 'artist') results.append(pageJump(state.page, pages, move));
-  const list = node('div', state.galleryFocus ? `gallery gallery-${state.galleryColumns} dense-gallery`
+  const windowCompact = document.documentElement.classList.contains('pocket-window-compact');
+  const list = node('div', windowCompact ? 'list window-compact-results'
+    : state.galleryFocus ? `gallery gallery-${state.galleryColumns} dense-gallery`
     : views[state.section] === 'grid' ? 'gallery' : 'list');
   const visibleCards = matching.slice(start, start + capacity);
   if (state.section === 'artist') artistPageCards = visibleCards;
-  list.append(...visibleCards.map((card, index) => row(card, { eager: index < 8 })));
+  list.append(...visibleCards.map((card, index) => row(card, windowCompact
+    ? { view: 'list', grid: false, eager: index < 4 }
+    : { eager: index < 8 })));
   results.append(list);
   if (pages > 1) results.append(pageSteps(state.page, pages, move));
   if (pages > 1 && state.section === 'artist') results.append(pageJump(state.page, pages, move));
@@ -2139,6 +2176,7 @@ function openScreen(title, back = null, wide = false) {
   screen.classList.remove('artist-chain-screen');
   screen.classList.remove('artist-mixer-screen');
   screen.classList.remove('theme-open');
+  screen.classList.remove('codex-open');
   screen.classList.toggle('detail-wide', wide);
   byId('screen-title').textContent = title;
   body.replaceChildren();
@@ -2150,6 +2188,7 @@ function openScreen(title, back = null, wide = false) {
 function closeScreen() {
   screenRevision++;
   screenBack = null;
+  screen.classList.remove('codex-open');
   screen.close();
   body.replaceChildren();
   actions.replaceChildren();
@@ -2730,10 +2769,12 @@ async function setupWindowsFeatures() {
       renderWindowMode(info.windowCompact === true);
 
       function renderWindowMode(compact) {
+        const changed = document.documentElement.classList.contains('pocket-window-compact') !== compact;
         document.documentElement.classList.toggle('pocket-window-compact', compact);
         toggle.textContent = compact ? '展开窗口' : '折叠窗口';
         toggle.setAttribute('aria-expanded', String(!compact));
         toggle.setAttribute('aria-controls', 'main');
+        if (changed) renderList();
       }
     }
     const sinceLastCheck = Date.now() - (Number(readJsonStorageOr(windowsUpdateCheckTimeKey, 0)) || 0);
@@ -2794,15 +2835,19 @@ function showDesktopGallery() {
 
 function showTools(initialUpdate) {
   openScreen('设置与工具');
+  const returnToTools = () => showTools(initialUpdate);
   const image = toolSection('导入原图生成信息', desktopApp
     ? '选择 PNG、WebP 或 JPEG 原图，在电脑上查看和复制图片中保存的生成参数。'
     : '选择 NovelAI 保存的 PNG 或 WebP 原图，逐项复制提示词和生成参数。也可保存小预览和生成信息到图库。');
   image.append(button('选择原图', 'primary', readImagePrompts));
   const codex = toolSection('法典图鉴',
-    '在原站看图并复制提示词，再回随机画风工坊粘贴。');
+    '在 App 内查看作者原站；复制提示词后可用下方入口粘贴，继续识别画师、TAG、收藏和画风串。');
   const codexActions = node('div', 'tool-actions');
-  codexActions.append(button('法典图鉴 · 打开原站', 'soft', () => openLink(codexAtlasUrl)),
-    button('打开随机画风工坊', 'soft', () => window.PocketApp.chain.openMixer({ back: () => showTools(initialUpdate) })));
+  codexActions.append(
+    button('法典图鉴 · 打开作者原站', 'soft', () => openCodexAtlas(returnToTools)),
+    button('使用已复制的提示词', 'soft', () => showCodexPromptPaste(returnToTools)),
+    button('打开随机画风工坊', 'soft', () => window.PocketApp.chain.openMixer({ back: returnToTools })),
+  );
   codex.append(codexActions);
   const tagGallery = toolSection('外站图库连接', '配置 App 内图库的 API 凭据。也可以从图库直接打开官网。');
   if (window.Pocket) {

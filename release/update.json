@@ -1,8 +1,8 @@
 {
-  "versionCode": 30,
-  "versionName": "1.3.29",
+  "versionCode": 31,
+  "versionName": "1.3.30",
   "file": "NAI-Pocket-Library.apk",
-  "bytes": 1230425,
-  "sha256": "4f7ddea9896cd9f945726541a89bad40898c0943016e909b5d192c81104c71ef",
-  "notes": "取消原图固定像素上限。检索到的英文 TAG 可直接到 D 站找图。"
+  "bytes": 1234521,
+  "sha256": "f832d153e3e666b0fb8d8258fd04880f8fb22931813621686655fe82f20b75cf",
+  "notes": "在 App 内打开法典图鉴。可粘贴正向和负向提示词，接着检索、收藏或加入画风串。"
 }

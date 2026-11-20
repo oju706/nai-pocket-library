@@ -39,6 +39,7 @@ public final class TagWebsiteActivity extends Activity {
 
     private static final String DANBOORU_HOST = "danbooru.donmai.us";
     private static final String GELBOORU_HOST = "gelbooru.com";
+    private static final String CODEX_HOST = "novelai.quicktagcloud.com";
     private static final int PAPER = Color.rgb(246, 244, 237);
     private static final int INK = Color.rgb(43, 40, 36);
     private static final int MUTED = Color.rgb(112, 105, 96);
@@ -68,7 +69,7 @@ public final class TagWebsiteActivity extends Activity {
             if (!"https".equalsIgnoreCase(url.getScheme()) || url.getHost() == null || url.getUserInfo() != null) return false;
             String host = url.getHost().toLowerCase(Locale.ROOT);
             String authority = url.getRawAuthority();
-            return (DANBOORU_HOST.equals(host) || GELBOORU_HOST.equals(host))
+            return (DANBOORU_HOST.equals(host) || GELBOORU_HOST.equals(host) || CODEX_HOST.equals(host))
                     && (host.equalsIgnoreCase(authority) || (host + ":443").equalsIgnoreCase(authority));
         } catch (URISyntaxException invalid) {
             return false;
@@ -89,7 +90,7 @@ public final class TagWebsiteActivity extends Activity {
         } else {
             updateSiteIdentity(null);
             showError("无法打开该网站",
-                    "仅支持 Danbooru 与 Gelbooru 的 HTTPS 官网地址。",
+                    "仅支持 Danbooru、Gelbooru 与法典图鉴的 HTTPS 官网地址。",
                     null, null);
         }
     }
@@ -289,7 +290,7 @@ public final class TagWebsiteActivity extends Activity {
         if (!allows(uri)) {
             updateSiteIdentity(null);
             showError("无法打开该网站",
-                    "仅支持 Danbooru 与 Gelbooru 的 HTTPS 官网地址。",
+                    "仅支持 Danbooru、Gelbooru 与法典图鉴的 HTTPS 官网地址。",
                     null, null);
             return;
         }
@@ -302,11 +303,12 @@ public final class TagWebsiteActivity extends Activity {
 
     private void updateSiteIdentity(Uri uri) {
         String name = "Tag 网站";
-        String host = "仅限 Danbooru / Gelbooru 官网";
+        String host = "仅限受支持的 HTTPS 官网";
         if (uri != null && uri.getHost() != null) {
             String safeHost = uri.getHost().toLowerCase(Locale.ROOT);
             if (DANBOORU_HOST.equals(safeHost)) name = "Danbooru";
             if (GELBOORU_HOST.equals(safeHost)) name = "Gelbooru";
+            if (CODEX_HOST.equals(safeHost)) name = "法典图鉴";
             host = safeHost;
         }
         siteNameView.setText(name);
@@ -337,9 +339,9 @@ public final class TagWebsiteActivity extends Activity {
 
     private void blockedNavigation() {
         if (currentSite == null) {
-            showError("无法打开该网站", "请从图库打开 Danbooru 或 Gelbooru 官网。", null, null);
+            showError("无法打开该网站", "请从图库或法典入口打开受支持的官网。", null, null);
         } else {
-            Toast.makeText(this, "这个链接会离开官网，已留在当前页面。", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "这个链接会离开受支持的官网，已留在当前页面。", Toast.LENGTH_SHORT).show();
         }
     }
 
