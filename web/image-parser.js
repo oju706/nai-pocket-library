@@ -57,11 +57,11 @@ function chooseWebPromptImage() {
 
 const webPromptLimits = Object.freeze({
   fileBytes: 32 * 1024 * 1024,
-  pixels: 8_000_000,
   metadataBytes: 2 * 1024 * 1024,
   textFields: 128,
   ifdEntries: 256,
 });
+const promptAlphaTileSize = 512;
 const pngSignature = Object.freeze([137, 80, 78, 71, 13, 10, 26, 10]);
 const promptParameterWrappers = new Set([
   'comment', 'generation', 'request', 'settings', 'parameters',
@@ -386,9 +386,7 @@ async function parsePngMetadata(buffer) {
       width = readPromptU32(data, payloadStart);
       height = readPromptU32(data, payloadStart + 4);
       colorType = bytes[payloadStart + 9];
-      if (!width || !height || width * height > webPromptLimits.pixels) {
-        throw new Error('原图最多支持 800 万像素。');
-      }
+      if (!width || !height) throw new Error('PNG 图片尺寸无效。');
     } else if (type === 'tEXt' || type === 'zTXt' || type === 'iTXt') {
       metadataBytes += length;
       if (metadataBytes > webPromptLimits.metadataBytes) throw new Error('原图中的文本信息超过 2 MB。');
@@ -467,7 +465,6 @@ function parseWebpMetadata(buffer) {
     offset = start + length + (length & 1);
   }
   if (!width || !height) throw new Error('WebP 缺少可识别的图片尺寸。');
-  if (width * height > webPromptLimits.pixels) throw new Error('原图最多支持 800 万像素。');
   return { kind: 'webp', width, height, hasAlpha, hasExif, hasXmp, exifError, fields };
 }
 
@@ -552,7 +549,6 @@ function parseJpegMetadata(buffer) {
     offset = payloadEnd;
   }
   if (!width || !height) throw new Error('JPEG 缺少可识别的图片尺寸。');
-  if (width * height > webPromptLimits.pixels) throw new Error('原图最多支持 800 万像素。');
   if (!reachedImage) throw new Error('JPEG 文件缺少图片数据。');
   return { kind: 'jpeg', width, height, hasExif, hasXmp, hasComment, exifError, fields };
 }
@@ -971,22 +967,49 @@ async function inspectPromptImagePixels(file, image) {
       throw new Error('图片尺寸与文件头不一致。');
     }
     canvas = document.createElement('canvas');
-    canvas.width = image.width;
-    canvas.height = image.height;
     const context = canvas.getContext('2d', { willReadFrequently: true });
     if (!context) throw new Error('无法读取原图的透明通道。');
-    context.drawImage(decoded.source, 0, 0);
-    const pixels = context.getImageData(0, 0, image.width, image.height).data;
+    // Hidden bits are stored column by column. Tall images only need one column per tile.
+    const tileSpanX = image.height > promptAlphaTileSize ? 1 : promptAlphaTileSize;
+    let tileX = -1;
+    let tileY = -1;
+    let tileWidth = 0;
+    let tileHeight = 0;
+    let tilePixels = null;
+    const alphaAt = (x, y) => {
+      const nextTileX = Math.floor(x / tileSpanX) * tileSpanX;
+      const nextTileY = Math.floor(y / promptAlphaTileSize) * promptAlphaTileSize;
+      if (nextTileX !== tileX || nextTileY !== tileY) {
+        tileX = nextTileX;
+        tileY = nextTileY;
+        tileWidth = Math.min(tileSpanX, image.width - tileX);
+        tileHeight = Math.min(promptAlphaTileSize, image.height - tileY);
+        canvas.width = tileWidth;
+        canvas.height = tileHeight;
+        context.imageSmoothingEnabled = false;
+        context.drawImage(
+          decoded.source,
+          tileX, tileY, tileWidth, tileHeight,
+          0, 0, tileWidth, tileHeight,
+        );
+        tilePixels = context.getImageData(0, 0, tileWidth, tileHeight).data;
+      }
+      return tilePixels[((y - tileY) * tileWidth + (x - tileX)) * 4 + 3];
+    };
     const fields = await extractNovelAiAlpha(
       image.width,
       image.height,
-      (x, y) => pixels[(y * image.width + x) * 4 + 3],
+      alphaAt,
     );
     return { fields, preview };
   } catch (error) {
     return { preview, alphaReadError: error?.message || '无法读取透明通道中的隐藏信息。' };
   } finally {
-    canvas?.remove();
+    if (canvas) {
+      canvas.width = 0;
+      canvas.height = 0;
+      canvas.remove();
+    }
     decoded.close();
   }
 }
@@ -1774,9 +1797,17 @@ function renderPromptTagLibrary(list, generation, artistCatalog, openBack, visib
       const controls = node('div', 'reference-tag-actions');
       controls.append(button('复制 TAG', 'soft compact', () => copy(tag.token)));
       if (tag.cards.size) controls.append(button('查看词库', 'soft compact', () => openMatches(tag)));
-      const wikiTag = PocketSources.tagGalleryTag(tag.name);
-      if (/^[a-z0-9][a-z0-9_()'.-]*$/i.test(wikiTag)) controls.append(button('D 站 Wiki', 'text-button', () =>
-        openTagGalleryWebsite('https://danbooru.donmai.us/wiki_pages/' + encodeURIComponent(wikiTag))));
+      const galleryTag = PocketSources.tagGalleryTag(tag.name);
+      if (/^[a-z0-9][a-z0-9_()'.-]*$/i.test(galleryTag)) {
+        controls.append(
+          button('D 站找图', 'soft compact', () => {
+            const scroll = body.scrollTop;
+            showTagGalleries(galleryTag, () => openBack(scroll), 'danbooru');
+          }),
+          button('D 站 Wiki', 'text-button', () =>
+            openTagGalleryWebsite('https://danbooru.donmai.us/wiki_pages/' + encodeURIComponent(galleryTag))),
+        );
+      }
       row.append(header, node('small', 'muted', [...tag.sources].join('、')), controls);
       rows.append(row);
     }

@@ -45,7 +45,6 @@ final class ImagePrompts {
     static final int MAX_INPUT = 32 * 1024 * 1024;
     static final int MAX_FIELD = 1024 * 1024;
     static final int MAX_METADATA = 2 * 1024 * 1024;
-    static final int MAX_PIXELS = 8_000_000;
     private static final int MAX_TEXT_FIELDS = 128;
     private static final int MAX_IFD_ENTRIES = 256;
     private static final int MAX_CONTAINER_CHUNKS = 10000;
@@ -696,11 +695,8 @@ final class ImagePrompts {
 
     private Map<String, String> readAlpha(ImageInput source, ImageData png) throws IOException {
         long pixels = (long)png.width * png.height;
-        if (pixels > MAX_PIXELS || png.width > 16384 || png.height > 16384) {
-            throw new IOException("隐藏信息读取最多支持 800 万像素的原图。");
-        }
         if (png.depth == 16) throw new IOException("未找到提示词文本；暂不支持 16 位 PNG 的隐藏信息。");
-        if (pixels * 4 > Runtime.getRuntime().maxMemory() / 3) {
+        if (pixels > (Runtime.getRuntime().maxMemory() / 3) / 4) {
             throw new IOException("原图较大，当前手机内存不足以读取隐藏信息。");
         }
         Bitmap bitmap = null;

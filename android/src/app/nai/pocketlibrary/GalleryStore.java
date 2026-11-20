@@ -45,7 +45,6 @@ final class GalleryStore {
     private static final int MAX_PREVIEW_BYTES = 192 * 1024;
     private static final int MAX_PREVIEW_EDGE = 640;
     private static final int MAX_PROMPT_BYTES = 16 * 1024 * 1024;
-    private static final long MAX_PIXELS = 24_000_000L;
     private static final String PREVIEW_MIME = "image/jpeg";
     private static GalleryStore shared;
     private final File directory;
@@ -380,9 +379,6 @@ final class GalleryStore {
             throw new IOException("没有读取所选原图的权限，请重新选择。");
         }
         if (bounds.outWidth < 1 || bounds.outHeight < 1) throw new IOException("图片损坏，无法生成预览。");
-        if ((long)bounds.outWidth * bounds.outHeight > MAX_PIXELS) {
-            throw new IOException("图片超过图库的 2400 万像素上限。");
-        }
 
         BitmapFactory.Options options = new BitmapFactory.Options();
         options.inSampleSize = 1;
