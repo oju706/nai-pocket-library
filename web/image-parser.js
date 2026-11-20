@@ -12,6 +12,7 @@ async function readImagePrompts() {
       if (!file || sequence !== webImagePromptSequence || revision !== screenRevision) return;
       const data = await readLocalNovelAiImage(file);
       if (sequence !== webImagePromptSequence || revision !== screenRevision) return;
+      if (desktopApp) data.galleryName = file.name;
       showPromptImport(data);
     } catch (error) {
       if (sequence === webImagePromptSequence && revision === screenRevision) {
@@ -1520,7 +1521,7 @@ function promptArtistCatalogNote(catalog) {
 
 let promptArtistPanelSequence = 0;
 
-function promptArtistRow(item, catalog, targetModel, openSample, polarity, sampleState) {
+function promptArtistRow(item, catalog, targetModel, openSample, polarity, sampleState, openDanbooru) {
   const row = node('div', 'prompt-artist-row');
   const header = node('div', 'pack-source');
   const info = node('div');
@@ -1536,9 +1537,18 @@ function promptArtistRow(item, catalog, targetModel, openSample, polarity, sampl
     info.append(node('small', '', '显式 artist: · 已保留，当前目录未精确命中'));
   }
   info.append(node('small', '', `来源：${[...item.sources].join('、')} · 原值：${[...item.originals].join(' / ')}`));
-  const controls = node('div', 'copy-fact');
+  const controls = node('div', 'tag-gallery-actions');
   controls.append(button('复制原标签', 'text-button', () => copy([...item.originals].join('\n'))));
   const preferred = preferredArtistRecord(item.candidates, targetModel);
+  if (openDanbooru && !item.ambiguous) {
+    const name = preferred ? artistChainCardTag(preferred.card) || artistCardTag(preferred.card) : item.name;
+    const tag = PocketSources.tagGalleryTag(name);
+    if (tag && !/^[~-]|[:*?]/.test(tag)) {
+      const search = button('D 站找图', 'soft compact', () => openDanbooru(tag));
+      search.setAttribute('aria-label', `在 D 站搜索 ${item.name}`);
+      controls.append(search);
+    }
+  }
   if (preferred) {
     const sampleModel = preferred.card.model || '未标注';
     const targetSeries = artistModelSeries(targetModel);
@@ -1621,7 +1631,7 @@ function promptArtistRow(item, catalog, targetModel, openSample, polarity, sampl
   return row;
 }
 
-function renderPromptArtistUsage(generation, catalog, openSample, sampleState, openArtistChain, openWeightedChain) {
+function renderPromptArtistUsage(generation, catalog, openSample, sampleState, openArtistChain, openWeightedChain, openDanbooru) {
   const section = node('section', 'tool-section');
   const title = node('h2', '', '画风库画师');
   const used = collectPromptArtists(generation, catalog);
@@ -1658,14 +1668,14 @@ function renderPromptArtistUsage(generation, catalog, openSample, sampleState, o
       : '没有识别到正向使用的库内画师。'));
   } else {
     for (const item of used.values()) {
-      section.append(promptArtistRow(item, catalog, targetModel, openSample, 'positive', sampleState));
+      section.append(promptArtistRow(item, catalog, targetModel, openSample, 'positive', sampleState, openDanbooru));
     }
   }
   if (negative.size) {
     const details = node('details', 'metadata-details');
     details.append(node('summary', '', `负向中出现 · ${negative.size} 位（不视为使用）`));
     for (const item of negative.values()) {
-      details.append(promptArtistRow(item, catalog, targetModel, openSample, 'negative', sampleState));
+      details.append(promptArtistRow(item, catalog, targetModel, openSample, 'negative', sampleState, openDanbooru));
     }
     section.append(details);
   }
@@ -1834,7 +1844,9 @@ function showPromptImport(data, {
   const libraryButton = button('存小预览到图库', 'soft compact', async () => {
     libraryButton.disabled = true;
     try {
-      const saved = await native('saveLastOriginal');
+      const saved = desktopApp
+        ? await saveDesktopGalleryPreview(data.galleryName || '原图', data)
+        : await native('saveLastOriginal');
       if (revision !== screenRevision) return;
       if (!saved?.id) throw new Error('无法保存原图。');
       libraryButton.replaceWith(button('打开原图图库', 'soft compact', showGallery));
@@ -1867,7 +1879,8 @@ function showPromptImport(data, {
   const info = node('div', 'prompt-import-info');
   layout.append(media, info);
   body.append(layout);
-  if (window.Pocket && !galleryItem && !sample && !references.length) info.append(libraryButton);
+  if ((window.Pocket || desktopApp && smallPromptPreview(data.preview))
+    && !galleryItem && !sample && !references.length) info.append(libraryButton);
   if (sample) {
     const source = resourcePhoto;
     if (source.preview) {
@@ -1899,7 +1912,7 @@ function showPromptImport(data, {
   if (restored?.shownTags) tagLookupResults.dataset.visibleTags = String(restored.shownTags);
   content.append(artistMatches);
   const selected = {};
-  const artistSampleState = new Map();
+  const artistSampleState = restored?.artistSamples || new Map();
   let preparingFavorite = false;
   const hasActual = Boolean(data.actualPrompt || data.actualNegativePrompt
     || data.actualCharacters?.length || data.actualNegativeCharacters?.length);
@@ -2015,12 +2028,19 @@ function showPromptImport(data, {
 
   function renderArtistMatches() {
     artistMatches.replaceChildren(renderPromptArtistUsage(
-      detectedGeneration(), artistCatalog, showArtistSample, artistSampleState, addRecognizedArtists, addWeightedArtists));
+      detectedGeneration(), artistCatalog, showArtistSample, artistSampleState,
+      addRecognizedArtists, addWeightedArtists, searchArtistOnDanbooru));
+  }
+
+  function searchArtistOnDanbooru(tag) {
+    const scroll = body.scrollTop;
+    showTagGalleries(tag, () => reopenPrompt(scroll), 'danbooru');
   }
 
   function promptReturnState() {
     return {
-      ...selected, tagLookup: tagLookup.open, shownTags: Number(tagLookupResults.dataset.visibleTags) || 0,
+      ...selected, artistSamples: artistSampleState, tagLookup: tagLookup.open,
+      shownTags: Number(tagLookupResults.dataset.visibleTags) || 0,
       references: references.filter((tag) => selectedReferences.has(tag.name)).map((tag) => tag.name),
     };
   }

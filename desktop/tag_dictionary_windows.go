@@ -25,13 +25,17 @@ import (
 )
 
 const (
-	desktopDictionarySourceURL = "https://github.com/ffdkj/ffdkj-Danbooru_Tag-Chinese-English-Translation-Table/" +
-		"releases/download/v2026-11-01/tag.sqlite"
+	desktopDictionarySourceURL = "https://raw.githubusercontent.com/ffdkj/ffdkj-Danbooru_Tag-Chinese-English-Translation-Table/" +
+		"2ffcb019bae6d237f4a90cc1e462a967664eeb46/tag.sqlite"
 	desktopDictionaryRepository = "https://github.com/ffdkj/ffdkj-Danbooru_Tag-Chinese-English-Translation-Table"
-	desktopDictionaryVersion    = "v2026-11-01"
-	desktopDictionarySHA256     = "48523aaf9ac800e13a72c7d68ce78021e6d55c811891719ade0820c6c536b716"
-	desktopDictionaryBytes      = int64(24829952)
+	desktopDictionaryVersion    = "2026-11-20"
+	desktopDictionarySHA256     = "ec9c74d15c88736f41ac45256be11582c8400296345b5d0fb84394f7354549ee"
+	desktopDictionaryBytes      = int64(24997888)
 	desktopDictionaryLicense    = "MIT"
+
+	desktopDictionaryPreviousVersion = "v2026-11-01"
+	desktopDictionaryPreviousSHA256  = "48523aaf9ac800e13a72c7d68ce78021e6d55c811891719ade0820c6c536b716"
+	desktopDictionaryPreviousBytes   = int64(24829952)
 
 	desktopDictionaryLookupLimit      = 200
 	desktopDictionaryNameRuneLimit    = 512
@@ -66,10 +70,11 @@ type desktopDictionary struct {
 
 	// dbMu protects validation state and every open SQLite handle. It is held
 	// only for local file/schema work and never while downloading.
-	dbMu           sync.Mutex
-	validatedTable string
-	validatedBytes int64
-	validatedMod   time.Time
+	dbMu             sync.Mutex
+	validatedTable   string
+	validatedVersion string
+	validatedBytes   int64
+	validatedMod     time.Time
 
 	// downloadForTest lets tests stage a local synthetic database without
 	// opening a network connection.
@@ -77,14 +82,16 @@ type desktopDictionary struct {
 }
 
 type desktopDictionaryStatus struct {
-	Installed     bool   `json:"installed"`
-	Bytes         int64  `json:"bytes"`
-	ExpectedBytes int64  `json:"expectedBytes"`
-	Version       string `json:"version"`
-	SHA256        string `json:"sha256"`
-	Source        string `json:"source"`
-	Repository    string `json:"repository"`
-	License       string `json:"license"`
+	Installed        bool   `json:"installed"`
+	InstalledVersion string `json:"installedVersion,omitempty"`
+	UpdateAvailable  bool   `json:"updateAvailable"`
+	Bytes            int64  `json:"bytes"`
+	ExpectedBytes    int64  `json:"expectedBytes"`
+	Version          string `json:"version"`
+	SHA256           string `json:"sha256"`
+	Source           string `json:"source"`
+	Repository       string `json:"repository"`
+	License          string `json:"license"`
 }
 
 func newDesktopDictionary(cacheRoot string) *desktopDictionary {
@@ -210,7 +217,7 @@ func (d *desktopDictionary) status() (desktopDictionaryStatus, error) {
 		return status, desktopDictionaryPublicError("无法读取中文标签词典安装状态。", err)
 	}
 	status.Bytes = info.Size()
-	if !info.Mode().IsRegular() || info.Size() != d.expectedBytes {
+	if !info.Mode().IsRegular() {
 		d.forgetValidationLocked()
 		return status, nil
 	}
@@ -220,6 +227,8 @@ func (d *desktopDictionary) status() (desktopDictionaryStatus, error) {
 		return status, nil
 	}
 	status.Installed = table != ""
+	status.InstalledVersion = d.validatedVersion
+	status.UpdateAvailable = status.Installed && status.InstalledVersion != status.Version
 	return status, nil
 }
 
@@ -229,7 +238,7 @@ func (d *desktopDictionary) install(ctx context.Context) (desktopDictionaryStatu
 	}
 	defer d.operation.Unlock()
 
-	if status, err := d.status(); err != nil || status.Installed {
+	if status, err := d.status(); err != nil || (status.Installed && !status.UpdateAvailable) {
 		return status, err
 	}
 	if err := os.MkdirAll(d.directory, 0o700); err != nil {
@@ -267,7 +276,7 @@ func (d *desktopDictionary) install(ctx context.Context) (desktopDictionaryStatu
 	d.dbMu.Lock()
 	err = os.Rename(temporaryName, d.database)
 	if err == nil {
-		d.rememberValidationLocked(table)
+		d.rememberValidationLocked(table, desktopDictionaryVersion)
 	}
 	d.dbMu.Unlock()
 	if err != nil {
@@ -343,7 +352,7 @@ func (d *desktopDictionary) lookup(names []string) (map[string]string, error) {
 	if err != nil {
 		return nil, desktopDictionaryPublicError("无法读取中文标签词典。", err)
 	}
-	if !info.Mode().IsRegular() || info.Size() != d.expectedBytes {
+	if !info.Mode().IsRegular() {
 		d.forgetValidationLocked()
 		return result, nil
 	}
@@ -398,44 +407,54 @@ func (d *desktopDictionary) validatedTableLocked(info os.FileInfo) (string, erro
 		d.validatedMod.Equal(info.ModTime()) {
 		return d.validatedTable, nil
 	}
-	table, err := d.validateDownload(d.database)
+	version, expectedBytes, expectedSHA256 := desktopDictionaryVersion, d.expectedBytes, d.expectedSHA256
+	if info.Size() == desktopDictionaryPreviousBytes && info.Size() != d.expectedBytes {
+		version, expectedBytes, expectedSHA256 = desktopDictionaryPreviousVersion, desktopDictionaryPreviousBytes, desktopDictionaryPreviousSHA256
+	}
+	table, err := validateDesktopDictionaryFile(d.database, expectedBytes, expectedSHA256)
 	if err != nil {
 		return "", err
 	}
-	d.rememberValidationLocked(table)
+	d.rememberValidationLocked(table, version)
 	return table, nil
 }
 
-func (d *desktopDictionary) rememberValidationLocked(table string) {
+func (d *desktopDictionary) rememberValidationLocked(table, version string) {
 	info, err := os.Stat(d.database)
 	if err != nil || !info.Mode().IsRegular() {
 		d.forgetValidationLocked()
 		return
 	}
 	d.validatedTable = table
+	d.validatedVersion = version
 	d.validatedBytes = info.Size()
 	d.validatedMod = info.ModTime()
 }
 
 func (d *desktopDictionary) forgetValidationLocked() {
 	d.validatedTable = ""
+	d.validatedVersion = ""
 	d.validatedBytes = 0
 	d.validatedMod = time.Time{}
 }
 
 func (d *desktopDictionary) validateDownload(filename string) (string, error) {
+	return validateDesktopDictionaryFile(filename, d.expectedBytes, d.expectedSHA256)
+}
+
+func validateDesktopDictionaryFile(filename string, expectedBytes int64, expectedSHA256 string) (string, error) {
 	info, err := os.Stat(filename)
 	if err != nil {
 		return "", err
 	}
-	if !info.Mode().IsRegular() || info.Size() != d.expectedBytes {
+	if !info.Mode().IsRegular() || info.Size() != expectedBytes {
 		return "", errors.New("词典文件大小与发行信息不一致")
 	}
 	digest, err := desktopDictionaryFileSHA256(filename)
 	if err != nil {
 		return "", err
 	}
-	if !strings.EqualFold(digest, d.expectedSHA256) {
+	if !strings.EqualFold(digest, expectedSHA256) {
 		return "", errors.New("词典 SHA-256 与发行信息不一致")
 	}
 	return desktopDictionaryTable(filename)

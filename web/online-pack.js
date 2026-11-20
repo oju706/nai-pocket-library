@@ -347,6 +347,20 @@
         gallerySaving = true;
         updateSave();
         try {
+          if (desktopApp) {
+            const data = await readSameOriginPromptPhoto(item.original);
+            if (activeScreen !== screenRevision) return;
+            if (exportOnly) {
+              galleryWriteDesktopHtml(title, data.preview, data, packLabel);
+              toast('已导出离线图文，可直接用浏览器打开');
+            } else {
+              const result = await saveDesktopGalleryPreview(title, data);
+              if (activeScreen !== screenRevision) return;
+              galleryStored = true;
+              toast(result.promptCached ? '已存小预览和生成信息到图库' : '已存小预览，暂无可离线查看的生成信息');
+            }
+            return;
+          }
           const result = await native(exportOnly ? 'exportPackImageHtml' : 'saveOnlineToGallery', JSON.stringify({
             reference: item.original,
             name: title,
@@ -417,8 +431,7 @@
       body.append(view);
       showImage(showOriginal);
       const detailActions = node('div', 'online-pack-detail-actions');
-      detailActions.append(metadata, save);
-      if (!desktopApp) detailActions.append(saveToGallery, exportHtml);
+      detailActions.append(metadata, save, saveToGallery, exportHtml);
       actions.append(detailActions);
       bindSaveState(() => {
         save.disabled = saving || gallerySaving;

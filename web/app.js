@@ -695,7 +695,9 @@ function showTagDictionarySettings(back = null) {
     } else if (failure) {
       status.textContent = failure;
     } else if (info?.installed) {
-      status.textContent = `已安装 ${info.version || 'v2026-11-01'} · ${(installedBytes / (1024 * 1024)).toFixed(1)} MB · 安装态已校验，可离线使用。`;
+      const installedVersion = info.installedVersion || info.version;
+      status.textContent = `已安装 ${installedVersion} · ${(installedBytes / (1024 * 1024)).toFixed(1)} MB · 可离线使用。`;
+      if (info.updateAvailable) status.textContent += ` 可更新到 ${info.version}。`;
     } else if (info) {
       status.textContent = '未安装。词典缺失时所有原词照常显示、搜索和复制；安装失败不会影响搜图。';
     } else if (readingStatus) {
@@ -709,13 +711,15 @@ function showTagDictionarySettings(back = null) {
       controls.append(node('span', 'muted', '浏览器预览不安装本地词典，请在 Android App 中使用。'));
       return;
     }
-    const installLabel = info?.installed ? '校验安装' : failure ? '重试下载并安装（约 25 MB）' : '下载并安装（约 25 MB）';
+    let installLabel = failure ? '重试下载并安装（约 25 MB）' : '下载并安装（约 25 MB）';
+    if (info?.installed) installLabel = info.updateAvailable ? '更新词典（约 25 MB）' : '校验安装';
     const install = button(busy ? busyLabel : installLabel, 'primary', async () => {
-      if (info?.installed) {
+      if (info?.installed && !info.updateAvailable) {
         await runDictionaryAction('tagDictionaryStatus', '正在校验本机词典…', '中文标签词典状态正常');
         return;
       }
-      await runDictionaryAction('tagDictionaryInstall', '正在下载并校验词典…', '中文标签词典已安装');
+      await runDictionaryAction('tagDictionaryInstall', '正在下载并校验词典…',
+        info?.updateAvailable ? '中文标签词典已更新' : '中文标签词典已安装');
     });
     install.disabled = busy || readingStatus;
     controls.append(install);
@@ -1120,7 +1124,7 @@ function ensureOnline(check = false) {
         await response.body?.cancel();
       }
       state.hasOnline = true;
-      if (check) toast(status === 'current' ? '资源目录已是最新' : '已用新目录覆盖旧目录');
+      if (check) toast(status === 'current' ? 'NAX 官方导出目录暂无变化' : '已用新目录覆盖旧目录');
     })
     .catch(() => {
       if (check) toast('检查更新失败，当前目录仍可使用。');
@@ -2025,7 +2029,11 @@ function renderList() {
     const label = state.section === 'knowledge' ? '检查知识图鉴更新' : state.section === 'artist' ? '检查画师资源更新' : '检查角色资源更新';
     const update = button(state.onlineTask ? '检查中…' : label, 'text-button', () => ensureOnline(true));
     update.disabled = Boolean(state.onlineTask);
-    (resourceActions || meta).append(update);
+    const model = state.model === 'V4.5' ? 'v4.5' : 'v5';
+    const gallery = state.section === 'knowledge' ? 'hair' : state.section;
+    const latest = button('原站最新样图', 'text-button', () => openLink(
+      `https://nax.moe/?gallery=danbooru-${gallery}-tags-${model}&sort=date`));
+    (resourceActions || meta).append(update, latest);
   }
   if (!personal && (state.importing || (pack && state.packMessage))) {
     meta.prepend(node('span', '', state.packMessage));
@@ -2654,10 +2662,131 @@ async function checkAutomaticUpdate() {
   finally { checkingAutomaticUpdate = false; }
 }
 
+const windowsAutomaticUpdateKey = 'pocket-windows-automatic-update-v1';
+const windowsUpdateCheckTimeKey = 'pocket-windows-last-update-check-v1';
+let windowsUpdateOperation;
+let windowsUpdateOffer;
+
+async function windowsDesktopPost(route, payload = {}) {
+  const response = await fetch(`/api/${route}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const data = await response.json().catch(() => null);
+  if (!response.ok || !data) throw new Error(data?.error || '电脑版操作失败，请重试。');
+  return data;
+}
+
+function windowsAutoUpdateEnabled() {
+  return readJsonStorageOr(windowsAutomaticUpdateKey, true) !== false;
+}
+
+function updateWindows(download, automatic = false) {
+  if (windowsUpdateOperation) return windowsUpdateOperation;
+  windowsUpdateOperation = (async () => {
+    let info = await windowsDesktopPost('windows-update/' + (download ? 'download' : 'check'));
+    if (automatic && windowsAutoUpdateEnabled() && info.available && !info.ready) {
+      info = await windowsDesktopPost('windows-update/download');
+    }
+    windowsUpdateOffer = info;
+    writeJsonStorage(windowsUpdateCheckTimeKey, Date.now());
+    const notice = byId('update-notice');
+    notice.hidden = !info.available && !info.ready;
+    notice.replaceChildren();
+    if (!notice.hidden) {
+      const message = info.ready ? 'Windows 新版已就绪，下次启动生效' : '发现 Windows 新版';
+      notice.append(node('span', '', `${message} · ${info.version}`),
+        button('查看更新', 'soft compact', showTools));
+    }
+    return info;
+  })().finally(() => { windowsUpdateOperation = null; });
+  return windowsUpdateOperation;
+}
+
+async function setupWindowsFeatures() {
+  try {
+    const info = await getJson('/api/desktop.json');
+    if (info.windowEnabled) {
+      let savedScroll = main.scrollTop;
+      const toggle = button('折叠窗口', 'soft compact', async () => {
+        const compact = !document.documentElement.classList.contains('pocket-window-compact');
+        if (compact) savedScroll = main.scrollTop;
+        toggle.disabled = true;
+        let changed = false;
+        try {
+          await windowsDesktopPost('windows-window/compact', { compact });
+          renderWindowMode(compact);
+          main.scrollTop = compact ? 0 : savedScroll;
+          changed = true;
+        } catch (error) { toast(error.message); }
+        finally {
+          toggle.disabled = false;
+          if (compact && changed) query.focus();
+          else toggle.focus();
+        }
+      });
+      toggle.id = 'desktop-window-toggle';
+      document.querySelector('.top-actions')?.prepend(toggle);
+      renderWindowMode(info.windowCompact === true);
+
+      function renderWindowMode(compact) {
+        document.documentElement.classList.toggle('pocket-window-compact', compact);
+        toggle.textContent = compact ? '展开窗口' : '折叠窗口';
+        toggle.setAttribute('aria-expanded', String(!compact));
+        toggle.setAttribute('aria-controls', 'main');
+      }
+    }
+    const sinceLastCheck = Date.now() - (Number(readJsonStorageOr(windowsUpdateCheckTimeKey, 0)) || 0);
+    if (info.updateEnabled && windowsAutoUpdateEnabled() && (sinceLastCheck < 0 || sinceLastCheck >= 86400000)) {
+      await updateWindows(false, true);
+    }
+  } catch { /* Keep local tools usable when there is no window or update server. */ }
+}
+
+function showWindowsUpdate(version, controls, result) {
+  const release = button('打开 Windows 下载页', 'soft', () =>
+    openLink('https://github.com/oju706/nai-pocket-library/tree/main/release'));
+  controls.replaceChildren(release);
+  getJson('/api/desktop.json').then((info) => {
+    version.textContent = info?.version ? `当前 Windows 版本 ${info.version}` : 'Windows 便携版';
+    if (!info.updateEnabled) return;
+    const automatic = checkOption('启动时自动检查并下载（每天一次）', windowsAutoUpdateEnabled(), (enabled) => {
+      writeJsonStorage(windowsAutomaticUpdateKey, enabled);
+      if (enabled) run(false, true);
+    });
+    controls.prepend(button('检查应用更新', 'primary', () => run(false)));
+    version.after(automatic);
+    let running = false;
+
+    function display(offer) {
+      const message = offer.ready
+        ? `已准备好 ${offer.version}。关闭当前窗口后，再打开原来的程序即可更新。`
+        : offer.available ? `发现 Windows 新版 ${offer.version}。` : (offer.message || '当前已是最新版本。');
+      result.replaceChildren(node('p', '', message));
+      if (offer.notes) result.append(node('p', 'release-notes', offer.notes));
+      if (offer.available && !offer.ready) {
+        result.append(button('下载并校验新版', 'primary', () => run(true)));
+      }
+    }
+
+    async function run(download, automaticallyDownload = false) {
+      if (running) return;
+      running = true;
+      result.replaceChildren(node('p', '', download ? '正在下载并校验 Windows 新版…' : '正在检查 Windows 正式版…'));
+      try { display(await updateWindows(download, automaticallyDownload)); }
+      catch (error) { result.replaceChildren(node('p', '', error.message)); }
+      finally { running = false; }
+    }
+
+    if (windowsUpdateOffer) display(windowsUpdateOffer);
+  }).catch(() => { version.textContent = 'Windows 便携版'; });
+}
+
 function showDesktopGallery() {
   openScreen('图库');
   const tools = node('div', 'tool-actions');
-  tools.append(button('其他图包', 'primary', () => showPackSources(showDesktopGallery)),
+  tools.append(button('本机图库', 'primary', () => showGallery()),
+    button('其他图包', 'soft', () => showPackSources(showDesktopGallery)),
     button('选择原图', 'soft', readImagePrompts),
     button('Danbooru 图库', 'soft', () => showTagGalleries('', showDesktopGallery, 'danbooru')));
   body.append(tools);
@@ -2755,7 +2884,7 @@ function showTools(initialUpdate) {
     });
   }
   const update = toolSection('应用版本更新', desktopApp
-    ? 'Windows 便携版更新时下载并解压新版 ZIP。'
+    ? 'Windows 新版校验完成后，下次打开原来的程序会自动切换。'
     : '打开 App 时自动检查并下载新版。下载后校验长度、签名和版本，由你在安卓系统中确认安装。');
   const version = node('p', 'detail-note', '正在读取版本…');
   const repo = textInput('input', '', 'owner/repo 或 GitHub 仓库链接', 300);
@@ -2819,12 +2948,8 @@ function showTools(initialUpdate) {
   }).catch((error) => { version.textContent = error.message; });
   else {
     if (desktopApp) {
-      getJson('/api/desktop.json').then((info) => {
-        version.textContent = info?.version ? `当前 Windows 版本 ${info.version}` : 'Windows 便携版';
-      }).catch(() => { version.textContent = 'Windows 便携版'; });
       repo.closest('.field')?.remove();
-      controls.replaceChildren(button('打开 Windows 下载页', 'soft', () =>
-        openLink('https://github.com/oju706/nai-pocket-library/tree/main/release')));
+      showWindowsUpdate(version, controls, result);
     } else {
       version.textContent = '当前为浏览器预览，安卓 App 中可检查版本。';
       saveRepo.disabled = check.disabled = true;
@@ -2882,3 +3007,4 @@ loadPersonal();
 loadPacks();
 checkForSavedDirectory();
 checkAutomaticUpdate();
+if (desktopApp) setupWindowsFeatures();

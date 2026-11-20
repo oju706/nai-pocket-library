@@ -29,12 +29,16 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 final class TagDictionary {
-    static final String RELEASE_URL = "https://github.com/ffdkj/ffdkj-Danbooru_Tag-Chinese-English-Translation-Table/"
-            + "releases/download/v2026-11-01/tag.sqlite";
+    static final String RELEASE_URL = "https://raw.githubusercontent.com/"
+            + "ffdkj/ffdkj-Danbooru_Tag-Chinese-English-Translation-Table/"
+            + "2ffcb019bae6d237f4a90cc1e462a967664eeb46/tag.sqlite";
     static final String REPOSITORY = "https://github.com/ffdkj/ffdkj-Danbooru_Tag-Chinese-English-Translation-Table";
-    static final String VERSION = "v2026-11-01";
-    static final String SHA256 = "48523aaf9ac800e13a72c7d68ce78021e6d55c811891719ade0820c6c536b716";
-    static final long EXPECTED_BYTES = 24829952L;
+    static final String VERSION = "2026-11-20";
+    static final String SHA256 = "ec9c74d15c88736f41ac45256be11582c8400296345b5d0fb84394f7354549ee";
+    static final long EXPECTED_BYTES = 24997888L;
+    static final String LEGACY_VERSION = "v2026-11-01";
+    static final String LEGACY_SHA256 = "48523aaf9ac800e13a72c7d68ce78021e6d55c811891719ade0820c6c536b716";
+    static final long LEGACY_EXPECTED_BYTES = 24829952L;
 
     private static final int LOOKUP_LIMIT = 200;
     private static final int CONNECT_TIMEOUT_MS = 15000;
@@ -42,7 +46,8 @@ final class TagDictionary {
     private static final long DOWNLOAD_TIMEOUT_MS = 5 * 60 * 1000L;
     private static final int MAX_REDIRECTS = 5;
     private static final long MAX_ROWS = 20000000L;
-    private static final Set<String> RELEASE_ASSET_HOSTS = new HashSet<>(Arrays.asList(
+    private static final Set<String> TRUSTED_DOWNLOAD_HOSTS = new HashSet<>(Arrays.asList(
+            "raw.githubusercontent.com",
             "release-assets.githubusercontent.com",
             "objects.githubusercontent.com"
     ));
@@ -53,6 +58,7 @@ final class TagDictionary {
     private final Object operation = new Object();
     private final AtomicBoolean installing = new AtomicBoolean();
     private String validatedTable;
+    private String validatedVersion;
     private long validatedLength = -1;
     private long validatedModified = -1;
 
@@ -64,12 +70,9 @@ final class TagDictionary {
 
     JSONObject status() throws IOException, JSONException {
         synchronized (operation) {
-            if (!database.isFile()) return baseStatus(false);
-            if (database.length() != EXPECTED_BYTES) {
-                throw new IOException("中文标签词典文件不完整，请重新下载安装。");
-            }
+            if (!database.isFile()) return baseStatus(false, null);
             databaseTable();
-            return baseStatus(true);
+            return baseStatus(true, validatedVersion);
         }
     }
 
@@ -79,10 +82,12 @@ final class TagDictionary {
         }
         try {
             synchronized (operation) {
-                if (database.isFile() && database.length() == EXPECTED_BYTES) {
+                if (database.isFile()) {
                     try {
                         databaseTable();
-                        return baseStatus(true);
+                        if (VERSION.equals(validatedVersion)) {
+                            return baseStatus(true, validatedVersion);
+                        }
                     } catch (IOException ignored) {
                         // A damaged local copy is replaced after a verified download.
                     }
@@ -98,9 +103,9 @@ final class TagDictionary {
             String table = validateDownload(temporary);
             synchronized (operation) {
                 replaceAtomically(temporary, database);
-                rememberValidation(database, table);
+                rememberValidation(database, table, VERSION);
             }
-            return baseStatus(true);
+            return baseStatus(true, VERSION);
         } finally {
             if (temporary.exists()) temporary.delete();
             installing.set(false);
@@ -120,7 +125,7 @@ final class TagDictionary {
                     throw new IOException("无法清理未完成的词典下载。");
                 }
                 forgetValidation();
-                return baseStatus(false);
+                return baseStatus(false, null);
             }
         } finally {
             installing.set(false);
@@ -144,9 +149,6 @@ final class TagDictionary {
 
         synchronized (operation) {
             if (!database.isFile()) return result;
-            if (database.length() != EXPECTED_BYTES) {
-                throw new IOException("中文标签词典文件不完整，请重新安装。");
-            }
             String table = databaseTable();
             List<String> names = new ArrayList<>(unique);
             StringBuilder sql = new StringBuilder("SELECT name, cn_name FROM ")
@@ -170,9 +172,11 @@ final class TagDictionary {
         return result;
     }
 
-    private JSONObject baseStatus(boolean installed) throws JSONException {
+    private JSONObject baseStatus(boolean installed, String installedVersion) throws JSONException {
         return new JSONObject()
                 .put("installed", installed)
+                .put("installedVersion", installedVersion == null ? JSONObject.NULL : installedVersion)
+                .put("updateAvailable", installed && !VERSION.equals(installedVersion))
                 .put("bytes", database.isFile() ? database.length() : 0L)
                 .put("expectedBytes", EXPECTED_BYTES)
                 .put("version", VERSION)
@@ -210,7 +214,7 @@ final class TagDictionary {
                         throw new IOException("GitHub 下载重定向缺少目标地址。");
                     }
                     URL next = new URL(current, location.trim());
-                    requireReleaseAsset(next);
+                    requireTrustedDownloadTarget(next);
                     current = next;
                     continue;
                 }
@@ -257,11 +261,11 @@ final class TagDictionary {
         throw new IOException("GitHub 下载重定向次数过多。");
     }
 
-    private static void requireReleaseAsset(URL url) throws IOException {
+    private static void requireTrustedDownloadTarget(URL url) throws IOException {
         URLConnectionGuard.requireHttps(url);
         String host = url.getHost().toLowerCase(Locale.ROOT);
-        if (!RELEASE_ASSET_HOSTS.contains(host)) {
-            throw new IOException("GitHub 返回了非发布资产下载地址，已停止安装。");
+        if (!TRUSTED_DOWNLOAD_HOSTS.contains(host)) {
+            throw new IOException("GitHub 返回了非受信任下载地址，已停止安装。");
         }
     }
 
@@ -269,16 +273,20 @@ final class TagDictionary {
         if (file.length() != EXPECTED_BYTES) {
             throw new IOException("中文标签词典大小校验失败，未安装。");
         }
+        validateSha256(file, SHA256);
+        return tableName(file);
+    }
+
+    private static void validateSha256(File file, String expected) throws IOException {
         try (InputStream input = Files.newInputStream(file.toPath())) {
             MessageDigest digest = sha256();
             byte[] buffer = new byte[64 * 1024];
             int read;
             while ((read = input.read(buffer)) != -1) digest.update(buffer, 0, read);
-            if (!SHA256.equals(hex(digest.digest()))) {
-                throw new IOException("中文标签词典 SHA-256 校验失败，未安装。");
+            if (!expected.equals(hex(digest.digest()))) {
+                throw new IOException("中文标签词典 SHA-256 校验失败，请重新安装。");
             }
         }
-        return tableName(file);
     }
 
     private static String tableName(File file) throws IOException {
@@ -320,19 +328,26 @@ final class TagDictionary {
         if (validatedTable != null && validatedLength == length && validatedModified == modified) {
             return validatedTable;
         }
+        if (length != EXPECTED_BYTES && length != LEGACY_EXPECTED_BYTES) {
+            throw new IOException("中文标签词典大小不在兼容范围内，请重新安装。");
+        }
+        boolean legacy = length == LEGACY_EXPECTED_BYTES;
+        validateSha256(database, legacy ? LEGACY_SHA256 : SHA256);
         String table = tableName(database);
-        rememberValidation(database, table);
+        rememberValidation(database, table, legacy ? LEGACY_VERSION : VERSION);
         return table;
     }
 
-    private void rememberValidation(File file, String table) {
+    private void rememberValidation(File file, String table, String version) {
         validatedTable = table;
+        validatedVersion = version;
         validatedLength = file.length();
         validatedModified = file.lastModified();
     }
 
     private void forgetValidation() {
         validatedTable = null;
+        validatedVersion = null;
         validatedLength = -1;
         validatedModified = -1;
     }

@@ -1,8 +1,8 @@
 {
-  "versionCode": 24,
-  "versionName": "1.3.20",
+  "versionCode": 29,
+  "versionName": "1.3.28",
   "file": "NAI-Pocket-Library.apk",
-  "bytes": 1218137,
-  "sha256": "b245e275312d290c298624486c2b7e731886cced8195449b531cb0bef76601cc",
-  "notes": "新增随机画风工坊和珠光票根画师卡。可以从个人词库、画师筛选或 D 站加入画师池，独立设置各槽倍率并批量生成、保存成果。法典图鉴可打开原站并粘贴提示词。Windows 便携版可在同一仓库下载。"
+  "bytes": 1230425,
+  "sha256": "dd4f12aaa23c1158e20961919a7a0081a821fd8ef2d6ed4fedd91a618dc0ce4b",
+  "notes": "两端点图直接看参数，原图画师可按标签打开 D 站，中文词库新增 2026-11-20 快照。"
 }

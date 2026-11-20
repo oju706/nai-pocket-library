@@ -30,7 +30,7 @@ import (
 
 const (
 	appID       = "nai-pocket-library.desktop"
-	appVersion  = "1.3.23"
+	appVersion  = "1.3.28"
 	desktopPort = 17619
 
 	contentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
@@ -76,12 +76,16 @@ type application struct {
 	community   *communityZip
 	dictionary  *desktopDictionary
 	localZip    *localZip
+	gallery     *personalGallery
+	folders     *galleryFolders
+	updater     *windowsUpdater
+	window      desktopWindow
 }
 
 func newApplication(webRoot, cacheRoot string, port int) *application {
 	galleries := http.NewServeMux()
 	registerDanbooru(galleries)
-	return &application{
+	app := &application{
 		webRoot:     webRoot,
 		port:        port,
 		korean:      newKoreanLibrary(webRoot, cacheRoot),
@@ -91,7 +95,12 @@ func newApplication(webRoot, cacheRoot string, port int) *application {
 		community:   newCommunityZip(webRoot, cacheRoot),
 		dictionary:  newDesktopDictionary(cacheRoot),
 		localZip:    newLocalZip(cacheRoot, webRoot),
+		gallery:     newPersonalGallery(cacheRoot),
 	}
+	app.folders = newGalleryFolders(cacheRoot, func() (string, error) {
+		return pickRememberedGalleryFolder(app.window.folderPickerOwner())
+	})
+	return app
 }
 
 func main() {
@@ -122,14 +131,18 @@ func main() {
 		fatal("无法创建本地缓存目录：%v", err)
 	}
 
-	listener, existing, err := acquireListener(host, *port)
+	var updater *windowsUpdater
+	if !*noBrowser && *webFlag == "" {
+		updater = newWindowsUpdater(cacheRoot)
+	}
+	listener, existing, err := acquireListener(host, *port, updater)
 	if err != nil {
 		fatal("%v；不会打开其他程序的页面", err)
 	}
 	if existing {
 		log.Printf("检测到同一 App 已在运行，重新打开 %s", homeURL)
 		if !*noBrowser {
-			if _, err := openApplicationWindow(cacheRoot, homeURL); err != nil {
+			if _, err := openApplicationWindow(cacheRoot, homeURL, nil); err != nil {
 				log.Printf("无法重新打开窗口：%v；请手动访问 %s", err, homeURL)
 			}
 		}
@@ -137,6 +150,21 @@ func main() {
 	}
 
 	app := newApplication(webRoot, cacheRoot, *port)
+	app.updater = updater
+	if updater != nil {
+		if next := updater.activeExecutable(); next != "" && !isCurrentExecutable(next) {
+			command := exec.Command(next)
+			command.Dir = filepath.Dir(next)
+			command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+			if err := command.Start(); err == nil {
+				_ = listener.Close()
+				_ = command.Process.Release()
+				return
+			} else {
+				log.Printf("已下载的新版本暂时无法启动，继续打开当前版本：%v", err)
+			}
+		}
+	}
 	server := &http.Server{
 		Handler:           app,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -158,7 +186,7 @@ func main() {
 	log.Printf("NAI 口袋词库 %s 正在监听 %s", appVersion, homeURL)
 	var browserDone <-chan struct{}
 	if !*noBrowser {
-		browserDone, err = openApplicationWindow(cacheRoot, homeURL)
+		browserDone, err = openApplicationWindow(cacheRoot, homeURL, &app.window)
 		if err != nil {
 			log.Printf("无法自动打开浏览器：%v；请手动访问 %s", err, homeURL)
 		}
@@ -248,14 +276,14 @@ func desktopAddress(port int) string {
 	return "127.0.0.1:" + strconv.Itoa(port)
 }
 
-func acquireListener(host string, port int) (net.Listener, bool, error) {
+func acquireListener(host string, port int, updater *windowsUpdater) (net.Listener, bool, error) {
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		listener, err := net.Listen("tcp4", host)
 		if err == nil {
 			return listener, false, nil
 		}
-		if isAppRunning(host, port) {
+		if isAppRunning(host, port, updater) {
 			return nil, true, nil
 		}
 		if time.Now().After(deadline) {
@@ -265,7 +293,7 @@ func acquireListener(host string, port int) (net.Listener, bool, error) {
 	}
 }
 
-func isAppRunning(host string, port int) bool {
+func isAppRunning(host string, port int, updater *windowsUpdater) bool {
 	transport := &http.Transport{
 		Proxy:               nil,
 		DialContext:         (&net.Dialer{Timeout: time.Second}).DialContext,
@@ -308,12 +336,17 @@ func isAppRunning(host string, port int) bool {
 		return false
 	}
 	if marker.Version != appVersion {
+		if updater != nil {
+			if activation, ok := updater.readActivation(); ok && marker.Version == activation.Manifest.Version {
+				return true
+			}
+		}
 		fatal("当前已运行 Windows %s。关闭旧窗口和旧版程序后，再打开 %s。", marker.Version, appVersion)
 	}
 	return true
 }
 
-func openApplicationWindow(cacheRoot, homeURL string) (<-chan struct{}, error) {
+func openApplicationWindow(cacheRoot, homeURL string, window *desktopWindow) (<-chan struct{}, error) {
 	profile := filepath.Join(cacheRoot, "edge-profile")
 	if err := os.MkdirAll(profile, 0o700); err != nil {
 		return nil, err
@@ -330,9 +363,15 @@ func openApplicationWindow(cacheRoot, homeURL string) (<-chan struct{}, error) {
 		if err := command.Start(); err != nil {
 			log.Printf("Edge 独立窗口启动失败，改用默认浏览器：%v", err)
 		} else {
+			if window != nil {
+				window.setPID(command.Process.Pid)
+			}
 			done := make(chan struct{})
 			go func() {
 				_ = command.Wait()
+				if window != nil {
+					window.setPID(0)
+				}
 				close(done)
 			}()
 			return done, nil
@@ -372,6 +411,16 @@ func regularFile(filename string) bool {
 	return err == nil && info.Mode().IsRegular()
 }
 
+func isCurrentExecutable(filename string) bool {
+	current, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	currentInfo, currentErr := os.Stat(current)
+	fileInfo, fileErr := os.Stat(filename)
+	return currentErr == nil && fileErr == nil && os.SameFile(currentInfo, fileInfo)
+}
+
 func (app *application) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	headers := writer.Header()
 	setSecurityHeaders(headers)
@@ -404,11 +453,15 @@ func (app *application) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		writer.WriteHeader(http.StatusFound)
 		return
 	case "/api/desktop.json":
+		windowEnabled, windowCompact := app.window.status()
 		marker := desktopMarker{
-			App:     appID,
-			Version: appVersion,
-			Port:    app.port,
-			Home:    "http://" + desktopAddress(app.port) + "/index.html",
+			App:           appID,
+			Version:       appVersion,
+			Port:          app.port,
+			Home:          "http://" + desktopAddress(app.port) + "/index.html",
+			UpdateEnabled: app.updater != nil,
+			WindowEnabled: windowEnabled,
+			WindowCompact: windowCompact,
 		}
 		data, _ := json.Marshal(marker)
 		headers.Set("Cache-Control", "no-store")
@@ -438,6 +491,12 @@ func (app *application) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	case "/api/local-zip/catalog":
 		app.localZip.ServeHTTP(writer, request)
 		return
+	case "/api/personal-gallery", "/api/personal-gallery/metadata":
+		app.gallery.ServeHTTP(writer, request)
+		return
+	case "/api/gallery-folders", "/api/gallery-folders/images":
+		app.folders.ServeHTTP(writer, request)
+		return
 	case "/api/tag-gallery/posts", "/api/tag-gallery/tags":
 		app.danbooru.ServeHTTP(writer, request)
 		return
@@ -445,6 +504,14 @@ func (app *application) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 
 	if strings.HasPrefix(request.URL.Path, danbooruImageRoute) {
 		app.danbooru.ServeHTTP(writer, request)
+		return
+	}
+	if strings.HasPrefix(request.URL.Path, "/gallery-image/") {
+		app.gallery.ServeHTTP(writer, request)
+		return
+	}
+	if strings.HasPrefix(request.URL.Path, "/gallery-folder-image/") {
+		app.folders.ServeHTTP(writer, request)
 		return
 	}
 	if strings.HasPrefix(request.URL.Path, "/korean-image/") {
@@ -488,11 +555,30 @@ func (app *application) serveLocalPost(writer http.ResponseWriter, request *http
 		handler = app.dictionary
 	case "/api/local-zip/remove":
 		handler = app.localZip
+	case "/api/personal-gallery/save", "/api/personal-gallery/delete":
+		handler = app.gallery
+		limit = 3 * 1024 * 1024
+	case "/api/gallery-folders/pick", "/api/gallery-folders/remove":
+		handler = app.folders
+		limit = 1024
+		if request.URL.Path == "/api/gallery-folders/pick" {
+			timeout = 5 * time.Minute
+		}
 	case "/api/local-zip/import":
 		handler = app.localZip
 		expected = "application/zip"
 		limit = 2 * 1024 * 1024 * 1024
 		timeout = 3 * time.Minute
+	case "/api/windows-update/check", "/api/windows-update/download":
+		if app.updater == nil {
+			return false
+		}
+		handler = app.updater
+		limit = 64
+		timeout = 3 * time.Minute
+	case "/api/windows-window/compact":
+		handler = http.HandlerFunc(app.serveCompactWindow)
+		limit = 64
 	default:
 		return false
 	}
@@ -520,10 +606,31 @@ func (app *application) serveLocalPost(writer http.ResponseWriter, request *http
 }
 
 type desktopMarker struct {
-	App     string `json:"app"`
-	Version string `json:"version"`
-	Port    int    `json:"port"`
-	Home    string `json:"home"`
+	App           string `json:"app"`
+	Version       string `json:"version"`
+	Port          int    `json:"port"`
+	Home          string `json:"home"`
+	UpdateEnabled bool   `json:"updateEnabled"`
+	WindowEnabled bool   `json:"windowEnabled"`
+	WindowCompact bool   `json:"windowCompact"`
+}
+
+func (app *application) serveCompactWindow(writer http.ResponseWriter, request *http.Request) {
+	var body struct {
+		Compact *bool `json:"compact"`
+	}
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil || body.Compact == nil || decoder.Decode(new(any)) != io.EOF {
+		writeAPIFailure(writer, request, http.StatusBadRequest, "窗口状态参数无效")
+		return
+	}
+	if err := app.window.setCompact(*body.Compact); err != nil {
+		writeAPIFailure(writer, request, http.StatusConflict, err.Error())
+		return
+	}
+	writer.Header().Set("Cache-Control", "no-store")
+	writeBytes(writer, request, http.StatusOK, "application/json; charset=utf-8", []byte(`{}`))
 }
 
 func setSecurityHeaders(headers http.Header) {
