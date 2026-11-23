@@ -8,6 +8,12 @@
 
 「在 App 内打开官网」会在独立的网页页签保留站点自己的搜索、登录和浏览方式。Gelbooru 的图库接口需要用户 ID 和 API Key，直接打开官网可使用站点自己的访问方式。来源选择参考 [NAI Launcher v4.3.1](https://github.com/Aaalice233/Aaalice_NAI_Launcher/releases/tag/v4.3.1)。
 
+## 1.3.31 · Android 和 Windows
+
+- 「画面提示词知识 → 画面标签字典」可导入 visual-tags.json。支持离线查阅、分类浏览、中英文和别名搜索，复制按钮使用 NAI 提示词。
+- 原图参数页、粘贴提示词和 D 站标签菜单可以查看字典里的中文释义、用法和推荐搭配。
+- 韩国画风图库新增 2026-11-24 图包，可按更新日期浏览。缩略图按需加载，原图保留可用的生成信息。
+
 ## 1.3.30 · Android 和 Windows
 
 - 从「设置与工具」或「画面提示词知识 → 参考资料」在 App 内打开法典图鉴原站。词条和配图随原站更新。
@@ -149,7 +155,7 @@
 
 ## 构建与发布
 
-当前安卓版本为 1.3.30（versionCode 31），包名为 `app.nai.pocketlibrary`。构建使用 Windows 上的 PowerShell、JDK 17、Android SDK Platform 35 和 Build Tools 35.0.0。Windows 便携版的构建入口是 `desktop/build.ps1`。
+当前安卓版本为 1.3.31（versionCode 32），包名为 `app.nai.pocketlibrary`。构建使用 Windows 上的 PowerShell、JDK 17、Android SDK Platform 35 和 Build Tools 35.0.0。Windows 便携版的构建入口是 `desktop/build.ps1`。
 
 脚本使用下面的便携工具目录。可用 `-ToolCache` 指定目录位置。
 

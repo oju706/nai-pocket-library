@@ -3,14 +3,20 @@ package app.nai.pocketlibrary;
 import android.app.Activity;
 import android.content.Intent;
 import android.net.Uri;
+import android.os.Handler;
+import android.os.Looper;
+import android.util.JsonReader;
+import android.util.JsonToken;
 
 import org.json.JSONObject;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.StringReader;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
@@ -18,25 +24,32 @@ import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/** Explicit user-selected JSON backups. No storage permission or network is needed. */
+/** User-selected JSON backups and visual tag dictionaries. */
 final class LibraryBackup {
     static final int EXPORT = 71;
     static final int IMPORT = 72;
+    private static final int IMPORT_VISUAL_TAGS = 74;
     static final int MAX_BYTES = 20 * 1024 * 1024;
+    static final String VISUAL_TAGS_ROUTE = "/api/imported-visual-tags/";
 
     interface Result { void complete(int id, Object value, String error); }
 
     private final Activity activity;
     private final Result result;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
+    private final Handler main = new Handler(Looper.getMainLooper());
+    private final Runnable expireVisualTags = this::clearVisualTags;
     private volatile boolean destroyed;
     private volatile Closeable activeStream;
     private int operation;
     private int requestId;
     private byte[] exportData;
+    private String visualTagsPath;
+    private byte[] visualTagsData;
 
     LibraryBackup(Activity activity, Result result) {
         this.activity = activity;
@@ -69,11 +82,23 @@ final class LibraryBackup {
     }
 
     void importBackup(int id) {
-        if (!begin(id, IMPORT)) return;
+        chooseJson(id, IMPORT);
+    }
+
+    void importVisualTags(int id) {
+        if (hasPendingVisualTags()) {
+            result.complete(id, null, "画面标签字典已读取，请稍后再试。");
+            return;
+        }
+        chooseJson(id, IMPORT_VISUAL_TAGS);
+    }
+
+    private void chooseJson(int id, int code) {
+        if (!begin(id, code)) return;
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
                 .setType("*/*").putExtra(Intent.EXTRA_MIME_TYPES,
                         new String[] { "application/json", "application/octet-stream", "text/plain" });
-        launch(intent, IMPORT);
+        launch(intent, code);
     }
 
     private boolean begin(int id, int action) {
@@ -93,15 +118,16 @@ final class LibraryBackup {
     }
 
     boolean handleActivityResult(int code, int response, Intent data) {
-        if (code != EXPORT && code != IMPORT) return false;
+        if (code != EXPORT && code != IMPORT && code != IMPORT_VISUAL_TAGS) return false;
         if (operation != code || destroyed) return true;
+        boolean visualTags = code == IMPORT_VISUAL_TAGS;
         Uri uri = data == null ? null : data.getData();
         if (response != Activity.RESULT_OK || uri == null) {
             finish(null, null);
             return true;
         }
         if (!"content".equals(uri.getScheme())) {
-            finish(null, "请选择手机文件中的备份文件。");
+            finish(null, visualTags ? "请选择手机文件中的画面标签字典。" : "请选择手机文件中的备份文件。");
             return true;
         }
         final byte[] bytes = exportData;
@@ -118,17 +144,27 @@ final class LibraryBackup {
                     } finally { activeStream = null; }
                     finish(true, null);
                 } else {
-                    String json;
+                    byte[] contents;
+                    String label = visualTags ? "画面标签字典" : "备份";
                     try (InputStream input = activity.getContentResolver().openInputStream(uri)) {
                         if (input == null) throw new IOException("无法读取这个文件。");
                         setActive(input);
-                        json = decode(readBounded(input));
+                        contents = readBounded(input, label);
                     } finally { activeStream = null; }
-                    validate(json);
-                    finish(json, null);
+                    String json = decode(contents, label);
+                    if (visualTags) {
+                        validateVisualTags(json);
+                        finish(holdVisualTags(contents), null);
+                    } else {
+                        validate(json);
+                        finish(json, null);
+                    }
                 }
             } catch (Exception failure) {
-                finish(null, message(failure, code == EXPORT ? "备份写入失败，请检查剩余空间后重试。" : "无法读取备份，请选择本应用导出的 JSON 文件。"));
+                String fallback = visualTags ? "无法读取画面标签字典，请重新选择 JSON 文件。"
+                        : code == EXPORT ? "备份写入失败，请检查剩余空间后重试。"
+                        : "无法读取备份，请选择本应用导出的 JSON 文件。";
+                finish(null, message(failure, fallback));
             }
         });
         return true;
@@ -142,29 +178,29 @@ final class LibraryBackup {
         }
     }
 
-    private static byte[] readBounded(InputStream input) throws IOException {
+    private static byte[] readBounded(InputStream input, String label) throws IOException {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         byte[] buffer = new byte[32768];
         for (int n; (n = input.read(buffer)) >= 0;) {
-            if (n > MAX_BYTES - bytes.size()) throw new IOException("备份超过 20 MB，暂时无法导入。");
+            if (n > MAX_BYTES - bytes.size()) throw new IOException(label + "超过 20 MB，暂时无法导入。");
             bytes.write(buffer, 0, n);
         }
         return bytes.toByteArray();
     }
 
-    private static String decode(byte[] bytes) throws IOException {
+    private static String decode(byte[] bytes, String label) throws IOException {
         try {
             String text = StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
                     .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString();
             return text.startsWith("\uFEFF") ? text.substring(1) : text;
         } catch (CharacterCodingException failure) {
-            throw new IOException("文件不是有效的 UTF-8 JSON 备份。");
+            throw new IOException("文件不是有效的 UTF-8 JSON " + label + "。");
         }
     }
 
     private static void validate(String json) throws IOException {
         try {
-            validateDepth(json);
+            validateDepth(json, "备份");
             JSONObject root = new JSONObject(json);
             if (!"nai-pocket-library".equals(root.optString("format")) || root.optInt("version", -1) != 1
                     || root.optJSONArray("cards") == null) throw new IOException("不是本应用支持的备份格式。");
@@ -173,7 +209,40 @@ final class LibraryBackup {
         }
     }
 
-    private static void validateDepth(String json) throws IOException {
+    private static void validateVisualTags(String json) throws IOException {
+        validateDepth(json, "画面标签字典");
+        boolean format = false;
+        boolean version = false;
+        boolean groups = false;
+        boolean entries = false;
+        try (JsonReader reader = new JsonReader(new StringReader(json))) {
+            reader.beginObject();
+            while (reader.hasNext()) {
+                String name = reader.nextName();
+                JsonToken type = reader.peek();
+                if ("format".equals(name) && type == JsonToken.STRING) {
+                    format = "nai-pocket-visual-tags".equals(reader.nextString());
+                    continue;
+                }
+                if ("schema_version".equals(name) && type == JsonToken.NUMBER) {
+                    version = reader.nextDouble() == 1;
+                    continue;
+                }
+                if ("groups".equals(name)) groups = type == JsonToken.BEGIN_ARRAY;
+                if ("entries".equals(name)) entries = type == JsonToken.BEGIN_ARRAY;
+                reader.skipValue();
+            }
+            reader.endObject();
+            if (reader.peek() != JsonToken.END_DOCUMENT) throw new IOException();
+        } catch (IOException | IllegalStateException failure) {
+            throw new IOException("文件不是有效的画面标签字典 JSON。");
+        }
+        if (!format || !version || !groups || !entries) {
+            throw new IOException("画面标签字典的格式或版本不受支持。");
+        }
+    }
+
+    private static void validateDepth(String json, String label) throws IOException {
         int depth = 0;
         boolean quoted = false;
         boolean escaped = false;
@@ -185,13 +254,42 @@ final class LibraryBackup {
                 else if (c == '"') quoted = false;
             } else if (c == '"') quoted = true;
             else if (c == '{' || c == '[') {
-                if (++depth > 64) throw new IOException("备份的数据层次异常，无法导入。");
+                if (++depth > 64) throw new IOException(label + "的数据层次异常，无法导入。");
             } else if (c == '}' || c == ']') depth--;
         }
     }
 
     private static String message(Exception failure, String fallback) {
         return failure instanceof IOException && failure.getMessage() != null ? failure.getMessage() : fallback;
+    }
+
+    private synchronized boolean hasPendingVisualTags() {
+        return visualTagsData != null;
+    }
+
+    // Hand the WebView a short, single-use URL so the file stays out of the JavaScript bridge.
+    private synchronized JSONObject holdVisualTags(byte[] bytes) throws org.json.JSONException, IOException {
+        if (destroyed) throw new IOException("操作已取消。");
+        if (visualTagsData != null) throw new IOException("已有画面标签字典等待读取。");
+        String path = VISUAL_TAGS_ROUTE + UUID.randomUUID();
+        JSONObject descriptor = new JSONObject().put("url", path);
+        visualTagsPath = path;
+        visualTagsData = bytes;
+        main.postDelayed(expireVisualTags, 60_000);
+        return descriptor;
+    }
+
+    synchronized InputStream takeVisualTags(String path) {
+        if (visualTagsData == null || !path.equals(visualTagsPath)) return null;
+        InputStream stream = new ByteArrayInputStream(visualTagsData);
+        clearVisualTags();
+        return stream;
+    }
+
+    private synchronized void clearVisualTags() {
+        main.removeCallbacks(expireVisualTags);
+        visualTagsPath = null;
+        visualTagsData = null;
     }
 
     private void finish(Object value, String error) {
@@ -208,6 +306,7 @@ final class LibraryBackup {
         destroyed = true;
         operation = 0;
         exportData = null;
+        clearVisualTags();
         Closeable stream = activeStream;
         if (stream != null) try { stream.close(); } catch (IOException ignored) {}
         worker.shutdownNow();

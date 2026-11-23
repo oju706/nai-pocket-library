@@ -168,6 +168,10 @@ public final class MainActivity extends Activity {
             if ("/online-pack.css".equals(path)) return response("text/css", getAssets().open("online-pack.css"), false);
             if ("/tag-gallery.js".equals(path)) return response("text/javascript", getAssets().open("tag-gallery.js"), false);
             if ("/tag-gallery.css".equals(path)) return response("text/css", getAssets().open("tag-gallery.css"), false);
+            if (path != null && path.startsWith(LibraryBackup.VISUAL_TAGS_ROUTE)) {
+                InputStream content = backup.takeVisualTags(path);
+                return content == null ? unavailable() : response("application/json", content, false);
+            }
             if ("/api/tag-gallery/posts".equals(path) || "/api/tag-gallery/tags".equals(path)) {
                 return tagGallerySearch(url, path.endsWith("/posts"));
             }
@@ -468,6 +472,7 @@ public final class MainActivity extends Activity {
                     return;
                 case "exportBackup":
                 case "importBackup":
+                case "importVisualTags":
                 case "readImagePrompts":
                     if (fileOperationBusy()) {
                         send(id, null, "已有文件选择或导入正在进行。");
@@ -475,6 +480,7 @@ public final class MainActivity extends Activity {
                     }
                     if ("exportBackup".equals(action)) backup.exportBackup(id, value);
                     else if ("importBackup".equals(action)) backup.importBackup(id);
+                    else if ("importVisualTags".equals(action)) backup.importVisualTags(id);
                     else imagePrompts.readImagePrompts(id);
                     return;
                 case "pickImage":

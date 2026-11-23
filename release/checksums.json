@@ -1,27 +1,27 @@
 [
   {
     "Name": "NAI-Pocket-Library.apk",
-    "Bytes": 1234521,
-    "SHA256": "f832d153e3e666b0fb8d8258fd04880f8fb22931813621686655fe82f20b75cf"
+    "Bytes": 1238617,
+    "SHA256": "8165291d2e451b35b3daafb86d8ac728a9f807bf95f7409523eeb6c767d7b994"
   },
   {
     "Name": "NAI-Pocket-Library-source.zip",
-    "Bytes": 1315675,
-    "SHA256": "b25c9fe7f8493d5486a751fad0ab91c1bc138280db719fe79eb6268c923b3306"
+    "Bytes": 1323351,
+    "SHA256": "59d9e0c66b320d86b7b242601151fa8606c21df291c3a8bea879cd65182ef8c5"
   },
   {
     "Name": "NAI-Pocket-Library-Windows-x64.zip",
-    "Bytes": 4539681,
-    "SHA256": "e3539f59ef79227eab0458e2604463ac39c80be2b21af8a28c65f0ec9753377a"
+    "Bytes": 4543547,
+    "SHA256": "ec1326335f2f85168421398caa9e101297b56b3738a65f52e81ab587011c3ca0"
   },
   {
     "Name": "update.json",
-    "Bytes": 319,
-    "SHA256": "439b613641e9ac0171edd7ebcaf0e67d04c262641d5592eb34460f56fe7c84e5"
+    "Bytes": 326,
+    "SHA256": "be87cebdcfd74d8716257a142614ab8e0008337da961582028b2256f019c2fd4"
   },
   {
     "Name": "desktop-update.json",
-    "Bytes": 359,
-    "SHA256": "ea7e009b391a44e424f8f0a502bf489cb96f7901b720c9ef762c8bd3c6a3ba7b"
+    "Bytes": 345,
+    "SHA256": "c698a24afb9439730db12c14fc0953cb46172879becbe6fc8d5ac8b493432a48"
   }
 ]

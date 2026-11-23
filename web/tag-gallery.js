@@ -711,6 +711,12 @@ function tagGalleryShowPost(gallery, index, requestedScroll = 0) {
           }));
         }
         if (gallery.site === 'danbooru') {
+          if (kind.section === 'knowledge') {
+            appendVisualTagAction(menuActions, tag.name, (entry, catalog) => {
+              const scroll = body.scrollTop;
+              showVisualTagDetail(entry, catalog, () => tagGalleryShowPost(gallery, index, scroll));
+            });
+          }
           menuActions.append(button('打开 Wiki', 'soft compact', () =>
             openTagGalleryWebsite(`https://danbooru.donmai.us/wiki_pages/${encodeURIComponent(
               tag.name.normalize('NFKC').trim().replace(/\s+/g, '_'))}`)));

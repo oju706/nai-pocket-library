@@ -1789,6 +1789,7 @@ function render() {
     resourceTabs.append(entryGroup);
   }
   if (state.section === 'knowledge') {
+    resourceTabs.append(button('画面标签字典', 'soft compact', () => showVisualTagDictionary()));
     if (state.mode === 'online') {
       for (const [value, label] of [['basic', '中文知识'], ['images', '在线图鉴'], ['references', '原帖资料']]) {
         resourceTabs.append(chip(label, state.knowledgeTab === value, () => {
@@ -2634,24 +2635,187 @@ async function restoreCards(cards, replace) {
   });
 }
 
+function chooseLocalJson(maxBytes, tooLargeMessage) {
+  const picker = node('input', '');
+  picker.type = 'file';
+  picker.accept = '.json,application/json';
+  return new Promise((resolve, reject) => {
+    picker.oncancel = () => resolve(null);
+    picker.onchange = async () => {
+      const file = picker.files[0];
+      if (!file) { resolve(null); return; }
+      if (file.size > maxBytes) { reject(new Error(tooLargeMessage)); return; }
+      try { resolve(await file.text()); } catch (error) { reject(error); }
+    };
+    picker.click();
+  });
+}
+
+async function chooseVisualTagJson() {
+  if (!window.Pocket) return chooseLocalJson(window.PocketApp.visualTags.maxBytes, '字典文件超过 20 MB。');
+  const file = await native('importVisualTags');
+  if (file === null) return null;
+  if (!/^\/api\/imported-visual-tags\/[a-zA-Z0-9-]+$/.test(file?.url || '')) {
+    throw new Error('无法读取字典文件，请重新选择。');
+  }
+  const response = await fetch(file.url, { cache: 'no-store' });
+  if (!response.ok) throw new Error('无法读取字典文件，请重新选择。');
+  return response.text();
+}
+
+function visualTagGroupLabel(group) {
+  return (group?.title || '').replace(/^\d+[_\s]+/, '');
+}
+
+function showVisualTagDetail(entry, catalog, back) {
+  openScreen('画面标签详情', back);
+  const category = [visualTagGroupLabel(catalog.groups.find((group) => group.id === entry.group)), entry.subcategory]
+    .filter(Boolean).join(' · ');
+  body.append(node('h2', 'reference-tag-name', entry.tag_raw));
+  if (category) body.append(node('p', 'muted', category));
+  if (entry.meaning_zh) body.append(node('p', 'detail-note', entry.meaning_zh));
+  const copied = node('div', 'copyable-prompt');
+  const heading = node('div', 'prompt-card-heading');
+  heading.append(node('h3', '', '提示词'), button('复制提示词', 'soft compact', () => copy(entry.tag_copy)));
+  copied.append(heading, node('div', 'prompt', entry.tag_copy));
+  body.append(copied);
+  for (const [label, value] of [
+    ['用法', entry.usage_zh], ['推荐搭配', entry.recommended], ['别名', entry.aliases], ['来源', entry.source],
+  ]) {
+    if (!value) continue;
+    const section = node('section', 'tool-section');
+    section.append(node('h3', '', label), node('p', 'detail-note', value));
+    body.append(section);
+  }
+  const galleryTag = PocketSources.tagGalleryTag(entry.tag_raw);
+  if (galleryTag) actions.append(button('D 站找图', 'soft', () => {
+    const scroll = body.scrollTop;
+    showTagGalleries(galleryTag, () => {
+      showVisualTagDetail(entry, catalog, back);
+      body.scrollTop = scroll;
+    }, 'danbooru');
+  }));
+}
+
+function appendVisualTagAction(target, tag, openDetail) {
+  const revision = screenRevision;
+  window.PocketApp.visualTags.load().then((catalog) => {
+    if (revision !== screenRevision || !target.isConnected) return;
+    const entry = catalog?.findTag(tag);
+    if (entry) target.append(button('标签用法', 'soft compact', () => openDetail(entry, catalog)));
+  }).catch(() => {});
+}
+
+async function showVisualTagDictionary(view = {}) {
+  openScreen('画面标签字典');
+  const revision = screenRevision;
+  const dictionary = window.PocketApp.visualTags;
+  const status = node('p', 'resource-note', '正在读取本机字典…');
+  status.setAttribute('role', 'status');
+  const search = textInput('input', view.query, '搜索标签、中文释义或别名', 160);
+  search.type = 'search';
+  const filter = options([['', '全部分类']], '');
+  filter.setAttribute('aria-label', '分类');
+  const form = node('div', 'form');
+  form.append(field('搜索标签', search), field('分类', filter));
+  const results = node('div', 'list');
+  const pageNav = node('div', '');
+  let catalog = null;
+  let matches = [];
+  let page = view.page || 0;
+  const pageSize = 32;
+
+  function renderPage() {
+    const pages = Math.max(1, Math.ceil(matches.length / pageSize));
+    page = Math.min(page, pages - 1);
+    status.textContent = catalog.data_version + ' · ' + catalog.entries.length.toLocaleString('zh-CN') + ' 条'
+      + (search.value.trim() || filter.value ? ' · 匹配 ' + matches.length.toLocaleString('zh-CN') + ' 条' : '');
+    results.replaceChildren();
+    pageNav.replaceChildren();
+    for (const entry of matches.slice(page * pageSize, (page + 1) * pageSize)) {
+      const row = node('article', 'reference-tag-row');
+      const name = node('strong', 'reference-tag-name', entry.tag_raw);
+      const controls = node('div', 'reference-tag-actions');
+      controls.append(button('查看详情', 'soft compact', () => {
+        const savedView = { query: search.value, group: filter.value, page, scroll: body.scrollTop };
+        showVisualTagDetail(entry, catalog, () => showVisualTagDictionary(savedView));
+      }), button('复制提示词', 'soft compact', () => copy(entry.tag_copy)));
+      row.append(name);
+      if (entry.meaning_zh) row.append(node('span', 'muted', entry.meaning_zh));
+      row.append(controls);
+      results.append(row);
+    }
+    if (!matches.length) results.append(node('p', 'resource-note', '没有符合条件的标签。'));
+    const move = (next) => {
+      page = next;
+      renderPage();
+      body.scrollTop = 0;
+    };
+    if (pages > 1) pageNav.append(pageSteps(page, pages, move), pageJump(page, pages, move));
+  }
+
+  function refreshSearch() {
+    matches = catalog.search(search.value, filter.value);
+    renderPage();
+  }
+
+  function showCatalog(group) {
+    const groupChoices = [['', '全部分类'], ...catalog.groups.map((item) => [
+      item.id, visualTagGroupLabel(item) + '（' + item.count + '）',
+    ])];
+    filter.replaceChildren(...options(groupChoices, group).children);
+    filter.value = groupChoices.some(([id]) => id === group) ? group : '';
+    form.hidden = false;
+    refreshSearch();
+  }
+
+  const install = button('导入字典 JSON', 'primary', async () => {
+    install.disabled = true;
+    try {
+      const raw = await chooseVisualTagJson();
+      if (raw === null) return;
+      if (revision === screenRevision) status.textContent = '正在导入字典…';
+      catalog = await dictionary.install(raw);
+      if (revision !== screenRevision) return;
+      page = 0;
+      showCatalog(filter.value);
+      toast('画面标签字典已保存');
+    } catch (error) {
+      if (revision === screenRevision) {
+        if (catalog) renderPage();
+        else status.textContent = '选择 visual-tags.json，把画面标签字典保存到本机。';
+        toast(error?.message || '无法导入字典。');
+      }
+    } finally {
+      install.disabled = false;
+    }
+  });
+  install.disabled = true;
+  form.hidden = true;
+  search.addEventListener('input', () => { page = 0; refreshSearch(); });
+  filter.addEventListener('change', () => { page = 0; refreshSearch(); });
+  const content = node('div', 'form');
+  content.append(status, form, results, pageNav);
+  body.append(content);
+  actions.append(install);
+  try {
+    catalog = await dictionary.load();
+    if (revision !== screenRevision) return;
+    if (catalog) {
+      showCatalog(view.group || '');
+      body.scrollTop = view.scroll || 0;
+    } else status.textContent = '选择 visual-tags.json，把画面标签字典保存到本机。';
+  } catch {
+    if (revision === screenRevision) status.textContent = '无法读取本机字典，可以重新导入。';
+  } finally {
+    install.disabled = false;
+  }
+}
+
 async function importBackup() {
   try {
-    let raw;
-    if (window.Pocket) raw = await native('importBackup');
-    else {
-      const picker = document.createElement('input');
-      picker.type = 'file'; picker.accept = '.json,application/json';
-      raw = await new Promise((resolve, reject) => {
-        picker.oncancel = () => resolve(null);
-        picker.onchange = async () => {
-          const file = picker.files[0];
-          if (!file) { resolve(null); return; }
-          if (file.size > 20 * 1024 * 1024) { reject(new Error('备份文件超过 20 MB。')); return; }
-          try { resolve(await file.text()); } catch (error) { reject(error); }
-        };
-        picker.click();
-      });
-    }
+    const raw = window.Pocket ? await native('importBackup')
+      : await chooseLocalJson(20 * 1024 * 1024, '备份文件超过 20 MB。');
     if (raw === null) return;
     const cards = validateBackup(raw);
     openScreen('恢复个人词库');

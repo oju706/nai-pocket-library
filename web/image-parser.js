@@ -1755,7 +1755,7 @@ function renderPromptTagLibrary(list, generation, artistCatalog, openBack, visib
   const tags = promptTagLibraryMatches(generation, artistCatalog);
   const matched = tags.filter((tag) => tag.cards.size).length;
   const summary = node('p', 'resource-note',
-    `当前词库命中 ${matched} / ${tags.length} 个词。点「查看词库」读条目说明。`);
+    `当前词库命中 ${matched} / ${tags.length} 个词。「标签用法」可查看已导入的画面字典释义。`);
   const rows = node('div', 'reference-tag-list');
   const pageSize = 24;
   let shown = 0;
@@ -1797,6 +1797,12 @@ function renderPromptTagLibrary(list, generation, artistCatalog, openBack, visib
       const controls = node('div', 'reference-tag-actions');
       controls.append(button('复制 TAG', 'soft compact', () => copy(tag.token)));
       if (tag.cards.size) controls.append(button('查看词库', 'soft compact', () => openMatches(tag)));
+      if (!tag.explicit) {
+        appendVisualTagAction(controls, tag.name, (entry, catalog) => {
+          const scroll = body.scrollTop;
+          showVisualTagDetail(entry, catalog, () => openBack(scroll));
+        });
+      }
       const galleryTag = PocketSources.tagGalleryTag(tag.name);
       if (/^[a-z0-9][a-z0-9_()'.-]*$/i.test(galleryTag)) {
         controls.append(

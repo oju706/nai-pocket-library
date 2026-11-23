@@ -131,3 +131,151 @@ window.PocketApp.core = Object.freeze({
   readJsonStorageEntry, readJsonStorage, readJsonStorageOr, writeJsonStorage,
   debounce, copy,
 });
+
+// Keep the visual dictionary in its own store so replacing it leaves personal entries intact.
+(function () {
+  const format = 'nai-pocket-visual-tags';
+  const maxBytes = 20 * 1024 * 1024;
+  const fields = ['tag_raw', 'tag_copy', 'group', 'subcategory', 'meaning_zh',
+    'usage_zh', 'recommended', 'aliases', 'source'];
+
+  let database;
+  let cachedCatalog;
+  let loading;
+  let saving = Promise.resolve();
+
+  function tagKey(value) {
+    return value.normalize('NFKC').toLowerCase().replace(/[\s_]+/g, ' ').trim();
+  }
+
+  function buildCatalog(data) {
+    if (data?.format !== format || data.schema_version !== 1) {
+      throw new Error('请选择画面标签字典的 visual-tags.json 文件。');
+    }
+    const { data_version, groups, entries } = data;
+    if (typeof data_version !== 'string' || !data_version.trim()
+        || !Array.isArray(groups) || !groups.length || !Array.isArray(entries) || !entries.length) {
+      throw new Error('字典缺少版本、分类或标签。');
+    }
+
+    const counts = new Map();
+    for (const group of groups) {
+      if (typeof group?.id !== 'string' || !group.id.trim() || counts.has(group.id)
+          || typeof group.title !== 'string' || !group.title.trim()
+          || !Number.isSafeInteger(group.count) || group.count < 0) {
+        throw new Error('字典包含无效或重复的分类。');
+      }
+      counts.set(group.id, 0);
+    }
+
+    const originals = new Map();
+    const alternatives = new Map();
+    const searchRows = entries.map((entry, index) => {
+      if (!entry || fields.some((field) => typeof entry[field] !== 'string')
+          || !entry.tag_copy.trim() || !counts.has(entry.group)) {
+        throw new Error('字典第 ' + (index + 1) + ' 条标签不完整。');
+      }
+      const key = tagKey(entry.tag_raw);
+      if (!key || originals.has(key)) throw new Error('字典第 ' + (index + 1) + ' 条标签为空或重复。');
+      originals.set(key, entry);
+      counts.set(entry.group, counts.get(entry.group) + 1);
+      for (const name of [entry.tag_copy, ...entry.aliases.split(/[,，;；|｜、\r\n]+/)]) {
+        const alias = tagKey(name);
+        if (alias && !alternatives.has(alias)) alternatives.set(alias, entry);
+        else if (alias && alternatives.get(alias) !== entry) alternatives.set(alias, null);
+      }
+      const text = tagKey([entry.tag_raw, entry.tag_copy, entry.subcategory, entry.meaning_zh,
+        entry.usage_zh, entry.aliases].join('\n'));
+      return { entry, text };
+    });
+    if (groups.some((group) => counts.get(group.id) !== group.count)) {
+      throw new Error('字典分类数量与标签数量不符。');
+    }
+
+    return {
+      data_version,
+      groups,
+      entries,
+      findTag(name) {
+        const key = tagKey(String(name ?? ''));
+        return originals.get(key) || alternatives.get(key) || null;
+      },
+      search(query = '', group = '') {
+        const key = tagKey(query);
+        return searchRows.filter(({ entry, text }) =>
+          (!group || entry.group === group) && text.includes(key)).map(({ entry }) => entry);
+      },
+    };
+  }
+
+  function openDatabase() {
+    if (!database) {
+      database = new Promise((resolve, reject) => {
+        const request = indexedDB.open('nai-pocket-visual-tags', 1);
+        request.onupgradeneeded = () => request.result.createObjectStore('packs');
+        request.onsuccess = () => {
+          const db = request.result;
+          db.onversionchange = () => {
+            db.close();
+            database = null;
+          };
+          resolve(db);
+        };
+        request.onerror = () => reject(request.error);
+      }).catch((error) => {
+        database = null;
+        throw error;
+      });
+    }
+    return database;
+  }
+
+  async function accessCatalog(mode, command) {
+    const db = await openDatabase();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction('packs', mode);
+      const request = command(transaction.objectStore('packs'));
+      transaction.oncomplete = () => resolve(request.result);
+      transaction.onabort = () => reject(transaction.error);
+    });
+  }
+
+  function load() {
+    if (cachedCatalog !== undefined) return Promise.resolve(cachedCatalog);
+    if (!loading) {
+      loading = accessCatalog('readonly', (store) => store.get('catalog'))
+        .then((data) => {
+          if (cachedCatalog === undefined) cachedCatalog = data ? buildCatalog(data) : null;
+          return cachedCatalog;
+        })
+        .finally(() => { loading = null; });
+    }
+    return loading;
+  }
+
+  function install(text) {
+    const operation = saving.then(async () => {
+      if (typeof text !== 'string' || text.length > maxBytes || new TextEncoder().encode(text).length > maxBytes) {
+        throw new Error('字典文件过大或无法读取，大小上限为 20 MB。');
+      }
+      let data;
+      try {
+        data = JSON.parse(text.replace(/^\uFEFF/, ''));
+      } catch {
+        throw new Error('字典 JSON 格式无效。');
+      }
+      const catalog = buildCatalog(data);
+      try {
+        await accessCatalog('readwrite', (store) => store.put(data, 'catalog'));
+      } catch {
+        throw new Error('无法保存字典，请检查本机剩余空间。');
+      }
+      cachedCatalog = catalog;
+      return catalog;
+    });
+    saving = operation.catch(() => {});
+    return operation;
+  }
+
+  window.PocketApp.visualTags = Object.freeze({ maxBytes, load, install });
+})();

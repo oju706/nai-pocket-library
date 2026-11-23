@@ -1,8 +1,8 @@
 {
-  "versionCode": 31,
-  "versionName": "1.3.30",
+  "versionCode": 32,
+  "versionName": "1.3.31",
   "file": "NAI-Pocket-Library.apk",
-  "bytes": 1234521,
-  "sha256": "f832d153e3e666b0fb8d8258fd04880f8fb22931813621686655fe82f20b75cf",
-  "notes": "在 App 内打开法典图鉴。可粘贴正向和负向提示词，接着检索、收藏或加入画风串。"
+  "bytes": 1238617,
+  "sha256": "8165291d2e451b35b3daafb86d8ac728a9f807bf95f7409523eeb6c767d7b994",
+  "notes": "新增画面标签字典导入与离线查询。原图参数、粘贴提示词和 D 站标签可查看中文用法。"
 }
