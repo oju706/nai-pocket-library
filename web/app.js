@@ -2710,7 +2710,7 @@ async function showVisualTagDictionary(view = {}) {
   openScreen('画面标签字典');
   const revision = screenRevision;
   const dictionary = window.PocketApp.visualTags;
-  const status = node('p', 'resource-note', '正在读取本机字典…');
+  const status = node('p', 'resource-note', '正在读取画面标签字典…');
   status.setAttribute('role', 'status');
   const search = textInput('input', view.query, '搜索标签、中文释义或别名', 160);
   search.type = 'search';
@@ -2728,7 +2728,9 @@ async function showVisualTagDictionary(view = {}) {
   function renderPage() {
     const pages = Math.max(1, Math.ceil(matches.length / pageSize));
     page = Math.min(page, pages - 1);
-    status.textContent = catalog.data_version + ' · ' + catalog.entries.length.toLocaleString('zh-CN') + ' 条'
+    const source = catalog.builtIn ? '内置' : '自定义';
+    status.textContent = source + ' ' + catalog.data_version + ' · '
+      + catalog.entries.length.toLocaleString('zh-CN') + ' 条'
       + (search.value.trim() || filter.value ? ' · 匹配 ' + matches.length.toLocaleString('zh-CN') + ' 条' : '');
     results.replaceChildren();
     pageNav.replaceChildren();
@@ -2769,7 +2771,7 @@ async function showVisualTagDictionary(view = {}) {
     refreshSearch();
   }
 
-  const install = button('导入字典 JSON', 'primary', async () => {
+  const install = button('导入自定义字典', 'primary', async () => {
     install.disabled = true;
     try {
       const raw = await chooseVisualTagJson();
@@ -2779,11 +2781,11 @@ async function showVisualTagDictionary(view = {}) {
       if (revision !== screenRevision) return;
       page = 0;
       showCatalog(filter.value);
-      toast('画面标签字典已保存');
+      toast('自定义画面标签字典已保存');
     } catch (error) {
       if (revision === screenRevision) {
         if (catalog) renderPage();
-        else status.textContent = '选择 visual-tags.json，把画面标签字典保存到本机。';
+        else status.textContent = '内置字典读取失败。请重新打开此页面，或导入自定义字典。';
         toast(error?.message || '无法导入字典。');
       }
     } finally {
@@ -2801,12 +2803,12 @@ async function showVisualTagDictionary(view = {}) {
   try {
     catalog = await dictionary.load();
     if (revision !== screenRevision) return;
-    if (catalog) {
-      showCatalog(view.group || '');
-      body.scrollTop = view.scroll || 0;
-    } else status.textContent = '选择 visual-tags.json，把画面标签字典保存到本机。';
+    showCatalog(view.group || '');
+    body.scrollTop = view.scroll || 0;
   } catch {
-    if (revision === screenRevision) status.textContent = '无法读取本机字典，可以重新导入。';
+    if (revision === screenRevision) {
+      status.textContent = '内置字典读取失败。请重新打开此页面，或导入自定义字典。';
+    }
   } finally {
     install.disabled = false;
   }

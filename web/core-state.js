@@ -142,13 +142,13 @@ window.PocketApp.core = Object.freeze({
   let database;
   let cachedCatalog;
   let loading;
-  let saving = Promise.resolve();
+  let catalogQueue = Promise.resolve();
 
   function tagKey(value) {
     return value.normalize('NFKC').toLowerCase().replace(/[\s_]+/g, ' ').trim();
   }
 
-  function buildCatalog(data) {
+  function buildCatalog(data, { builtIn = false } = {}) {
     if (data?.format !== format || data.schema_version !== 1) {
       throw new Error('请选择画面标签字典的 visual-tags.json 文件。');
     }
@@ -193,6 +193,7 @@ window.PocketApp.core = Object.freeze({
     }
 
     return {
+      builtIn,
       data_version,
       groups,
       entries,
@@ -240,21 +241,57 @@ window.PocketApp.core = Object.freeze({
     });
   }
 
+  function serializeCatalogOperation(operation) {
+    const queued = catalogQueue.then(operation);
+    catalogQueue = queued.catch(() => {});
+    return queued;
+  }
+
+  async function defaultCatalogData() {
+    const encoded = window.PocketApp.visualTagsDefault;
+    let content;
+    if (encoded) {
+      const binary = atob(encoded);
+      const bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+      content = new Blob([bytes]).stream();
+    } else {
+      const response = await fetch('./visual-tags-default.json.gz', { cache: 'no-store' });
+      if (!response.ok || !response.body) throw new Error('内置字典文件不存在。');
+      content = response.body;
+    }
+    return new Response(content.pipeThrough(new DecompressionStream('gzip'))).json();
+  }
+
   function load() {
     if (cachedCatalog !== undefined) return Promise.resolve(cachedCatalog);
     if (!loading) {
-      loading = accessCatalog('readonly', (store) => store.get('catalog'))
-        .then((data) => {
-          if (cachedCatalog === undefined) cachedCatalog = data ? buildCatalog(data) : null;
-          return cachedCatalog;
-        })
+      loading = serializeCatalogOperation(async () => {
+        if (cachedCatalog !== undefined) return cachedCatalog;
+        let data = null;
+        try {
+          data = await accessCatalog('readonly', (store) => store.get('catalog'));
+        } catch {
+          // The packaged dictionary remains available when local storage cannot be opened.
+        }
+        let importedCatalog = null;
+        if (data) {
+          try {
+            importedCatalog = buildCatalog(data);
+          } catch {
+            // Ignore a damaged stored copy and fall back to the packaged dictionary.
+          }
+        }
+        cachedCatalog = importedCatalog || buildCatalog(await defaultCatalogData(), { builtIn: true });
+        return cachedCatalog;
+      })
         .finally(() => { loading = null; });
     }
     return loading;
   }
 
   function install(text) {
-    const operation = saving.then(async () => {
+    return serializeCatalogOperation(async () => {
       if (typeof text !== 'string' || text.length > maxBytes || new TextEncoder().encode(text).length > maxBytes) {
         throw new Error('字典文件过大或无法读取，大小上限为 20 MB。');
       }
@@ -273,8 +310,6 @@ window.PocketApp.core = Object.freeze({
       cachedCatalog = catalog;
       return catalog;
     });
-    saving = operation.catch(() => {});
-    return operation;
   }
 
   window.PocketApp.visualTags = Object.freeze({ maxBytes, load, install });

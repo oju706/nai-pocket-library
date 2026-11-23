@@ -31,7 +31,7 @@ import (
 
 const (
 	appID       = "nai-pocket-library.desktop"
-	appVersion  = "1.3.31"
+	appVersion  = "1.3.32"
 	desktopPort = 17619
 
 	desktopWindowQuery        = "window"

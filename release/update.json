@@ -1,8 +1,8 @@
 {
-  "versionCode": 32,
-  "versionName": "1.3.31",
+  "versionCode": 33,
+  "versionName": "1.3.32",
   "file": "NAI-Pocket-Library.apk",
-  "bytes": 1238617,
-  "sha256": "8165291d2e451b35b3daafb86d8ac728a9f807bf95f7409523eeb6c767d7b994",
-  "notes": "新增画面标签字典导入与离线查询。原图参数、粘贴提示词和 D 站标签可查看中文用法。"
+  "bytes": 2107049,
+  "sha256": "0f7ce64da948d1b9c1dbe6ab13dc23d4062c7017cbdd80045c7aef7ed4f0b7fb",
+  "notes": "内置 v11.0 画面标签字典，8,452 条标签首次打开即可离线查询。原图及粘贴提示词自动匹配用法。"
 }

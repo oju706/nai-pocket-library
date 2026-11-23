@@ -158,6 +158,9 @@ public final class MainActivity extends Activity {
             if ("/index.html".equals(path)) return response("text/html", getAssets().open("index.html"), false);
             if ("/style.css".equals(path)) return response("text/css", getAssets().open("style.css"), false);
             if ("/core-state.js".equals(path)) return response("text/javascript", getAssets().open("core-state.js"), false);
+            if ("/visual-tags-default.json.gz".equals(path)) {
+                return response("application/gzip", getAssets().open("visual-tags-default.json.gz"), false);
+            }
             if ("/chain-workbench.js".equals(path)) return response("text/javascript", getAssets().open("chain-workbench.js"), false);
             if ("/image-parser.js".equals(path)) return response("text/javascript", getAssets().open("image-parser.js"), false);
             if ("/app.js".equals(path)) return response("text/javascript", getAssets().open("app.js"), false);
@@ -276,7 +279,8 @@ public final class MainActivity extends Activity {
     }
 
     private static WebResourceResponse response(String type, InputStream content, boolean cached) {
-        return new WebResourceResponse(type, type.startsWith("image/") ? null : "UTF-8", 200, "OK",
+        String encoding = type.startsWith("image/") || "application/gzip".equals(type) ? null : "UTF-8";
+        return new WebResourceResponse(type, encoding, 200, "OK",
                 Collections.singletonMap("Cache-Control", cached ? "private, max-age=604800" : "no-store"), content);
     }
 
